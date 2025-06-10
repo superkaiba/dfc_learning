@@ -77,19 +77,23 @@ class ActivationCache:
     def __init__(self, store_dir: str, submodule_name: str = None):
         if submodule_name is None:
             import warnings
+
             warnings.warn(
                 "submodule_name parameter will be required in future versions. "
                 "Please specify the submodule name when creating ActivationCache instances and specify the store_dir without the submodule folder.",
                 FutureWarning,
-                stacklevel=2
+                stacklevel=2,
             )
             self._cache_store_dir = store_dir
         else:
             self._cache_store_dir = os.path.join(store_dir, submodule_name)
 
-        self.config = json.load(open(os.path.join(self._cache_store_dir, "config.json"), "r"))
+        self.config = json.load(
+            open(os.path.join(self._cache_store_dir, "config.json"), "r")
+        )
         self.shards = [
-            ActivationShard(self._cache_store_dir, i) for i in range(self.config["shard_count"])
+            ActivationShard(self._cache_store_dir, i)
+            for i in range(self.config["shard_count"])
         ]
         self._range_to_shard_idx = np.cumsum([0] + [s.shape[0] for s in self.shards])
         if "store_tokens" in self.config and self.config["store_tokens"]:
@@ -358,9 +362,7 @@ class ActivationCache:
 
             if current_size > shard_size:
                 if shape is not None and not overwrite:
-                    assert (
-                        shape[0] == current_size
-                    )
+                    assert shape[0] == current_size
                     print(f"Shard {shard_count} already exists. Skipping.")
                 else:
                     print(f"Storing shard {shard_count}...", flush=True)
@@ -382,12 +384,10 @@ class ActivationCache:
             if total_size > max_total_tokens:
                 print("Max total tokens reached. Stopping collection.")
                 break
-        
+
         if current_size > 0:
             if shape is not None and not overwrite:
-                assert (
-                    shape[0] == current_size
-                )
+                assert shape[0] == current_size
                 print(f"Shard {shard_count} already exists. Skipping.")
             else:
                 print(f"Storing shard {shard_count}...", flush=True)
@@ -425,7 +425,9 @@ class ActivationCache:
         if store_tokens:
             print("Storing tokens...")
             tokens_cache = th.cat(tokens_cache, dim=0)
-            assert tokens_cache.shape[0] == total_size, f"{tokens_cache.shape[0]} != {total_size}"
+            assert (
+                tokens_cache.shape[0] == total_size
+            ), f"{tokens_cache.shape[0]} != {total_size}"
             th.save(tokens_cache, os.path.join(store_dir, "tokens.pt"))
 
         ActivationCache.cleanup_multiprocessing()
