@@ -171,8 +171,6 @@ class BatchTopKTrainer(SAETrainer):
         if not logging:
             return loss
         else:
-            if self.ae.decoupled_code:
-                f = f.sum(dim=1)
             assert f.shape == (x.shape[0], self.ae.dict_size)
             return namedtuple("LossLog", ["x", "x_hat", "f", "losses"])(
                 x,
