@@ -15,19 +15,21 @@ from typing import Callable
 from enum import Enum, auto
 from abc import ABC, abstractmethod
 from .utils import set_decoder_norm_to_unit_norm, ActivationNormalizer
+
+
 class NormalizableMixin(ABC):
     """
     Mixin class providing activation normalization functionality.
-    
+
     This mixin allows classes to optionally normalize and denormalize activations
     using an ActivationNormalizer. If no normalizer is provided, activations
     pass through unchanged.
     """
-    
+
     def __init__(self, activation_normalizer: ActivationNormalizer | None = None):
         """
         Initialize the normalization mixin.
-        
+
         Args:
             activation_normalizer: Optional normalizer for activations. If None,
                                  normalization is a no-op.
@@ -39,32 +41,33 @@ class NormalizableMixin(ABC):
     def normalize_activations(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
         """
         Normalize input activations using the configured normalizer.
-        
+
         Args:
             x: Input tensor to normalize
             inplace: If True, modify the input tensor in place
-            
+
         Returns:
             Normalized tensor (same as input if no normalizer configured)
         """
         if self.activation_normalizer is not None:
             return self.activation_normalizer.normalize(x, inplace=inplace)
         return x
-    
+
     def denormalize_activations(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
         """
         Denormalize input activations using the configured normalizer.
-        
+
         Args:
             x: Input tensor to denormalize
             inplace: If True, modify the input tensor in place
-            
+
         Returns:
             Denormalized tensor (same as input if no normalizer configured)
         """
         if self.activation_normalizer is not None:
             return self.activation_normalizer.denormalize(x, inplace=inplace)
         return x
+
 
 class Dictionary(ABC, nn.Module, PyTorchModelHubMixin):
     """
@@ -400,21 +403,21 @@ class JumpReluAutoEncoder(Dictionary, nn.Module):
 class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     """
     Batch Top-K Sparse Autoencoder implementation.
-    
+
     This SAE uses a batch-wise top-k sparsity mechanism where only the top k features
     across the entire batch are kept active. This enforces global sparsity constraints
     rather than per-sample sparsity.
-    
+
     Attributes:
         activation_dim: Dimension of input activations
-        dict_size: Number of dictionary features  
+        dict_size: Number of dictionary features
         k: Number of top features to keep active across the batch
         threshold: Threshold value for feature activation (when using threshold mode)
         encoder: Linear layer for encoding activations to features
         decoder: Linear layer for decoding features back to activations
         b_dec: Decoder bias parameter
     """
-    
+
     def __init__(
         self,
         activation_dim: int,
@@ -424,7 +427,7 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     ):
         """
         Initialize the Batch Top-K SAE.
-        
+
         Args:
             activation_dim: Dimension of the input activation vectors
             dict_size: Number of features in the dictionary
@@ -459,14 +462,14 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     ):
         """
         Encode input activations to sparse feature representations.
-        
+
         Args:
             x: Input activations of shape (batch_size, activation_dim)
             return_active: If True, return additional information about active features
             use_threshold: If True, use threshold-based sparsity; if False, use top-k
             normalize_activations: Whether to normalize input activations
             inplace_normalize: Whether to normalize activations in-place
-            
+
         Returns:
             If return_active is False:
                 encoded_acts_BF: Sparse feature activations (batch_size, dict_size)
@@ -501,11 +504,11 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     def decode(self, x: th.Tensor, denormalize_activations: bool = True) -> th.Tensor:
         """
         Decode sparse feature representations back to activations.
-        
+
         Args:
             x: Sparse feature activations of shape (batch_size, dict_size)
             denormalize_activations: Whether to denormalize the output activations
-            
+
         Returns:
             Reconstructed activations of shape (batch_size, activation_dim)
         """
@@ -522,21 +525,23 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     ):
         """
         Forward pass through the autoencoder.
-        
+
         Args:
             x: Input activations of shape (batch_size, activation_dim)
             output_features: If True, return both reconstructions and features
             normalize_activations: Whether to normalize input activations
-            
+
         Returns:
             If output_features is False:
                 x_hat_BD: Reconstructed activations (batch_size, activation_dim)
             If output_features is True:
-                Tuple of (x_hat_BD, encoded_acts_BF) where encoded_acts_BF 
+                Tuple of (x_hat_BD, encoded_acts_BF) where encoded_acts_BF
                 are the sparse feature activations
         """
         encoded_acts_BF = self.encode(x, normalize_activations=normalize_activations)
-        x_hat_BD = self.decode(encoded_acts_BF, denormalize_activations=normalize_activations)
+        x_hat_BD = self.decode(
+            encoded_acts_BF, denormalize_activations=normalize_activations
+        )
 
         if not output_features:
             return x_hat_BD
@@ -546,10 +551,10 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     def scale_biases(self, scale: float):
         """
         Scale the bias parameters by a given factor.
-        
+
         This is useful for adjusting the magnitude of biases during training
         or when changing the scale of input activations.
-        
+
         Args:
             scale: Factor to multiply biases by
         """
@@ -564,17 +569,17 @@ class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
     ) -> "BatchTopKSAE":
         """
         Load a pretrained BatchTopKSAE from a file or hub.
-        
+
         Args:
             path: Path to the saved model file or hub identifier
             k: Number of top features to keep active. If None, use value from saved model
             device: Device to load the model on
             from_hub: Whether to load from the Hugging Face hub
             **kwargs: Additional arguments passed to hub loading
-            
+
         Returns:
             Loaded BatchTopKSAE instance
-            
+
         Raises:
             ValueError: If provided k doesn't match the saved model's k value
         """
@@ -657,11 +662,11 @@ class AutoEncoderNew(Dictionary, nn.Module):
 class CrossCoderEncoder(nn.Module):
     """
     A crosscoder encoder that transforms multi-layer activations to dictionary features.
-    
+
     This encoder processes activations from multiple layers simultaneously, applying
     layer-specific transformations and summing the results to produce a single
     dictionary feature representation.
-    
+
     Attributes:
         activation_dim: Dimension of input activations for each layer
         dict_size: Number of features in the dictionary
@@ -684,7 +689,7 @@ class CrossCoderEncoder(nn.Module):
     ):
         """
         Initialize the CrossCoder encoder.
-        
+
         Args:
             activation_dim: Dimension of the input activation vectors for each layer
             dict_size: Number of features in the dictionary
@@ -693,7 +698,7 @@ class CrossCoderEncoder(nn.Module):
             norm_init_scale: Scale factor for weight normalization after initialization
             encoder_layers: Specific layer indices to encode from (defaults to all layers)
             activation_normalizer: Optional normalizer for input activations
-            
+
         Raises:
             ValueError: If neither encoder_layers nor num_layers is specified
         """
@@ -737,7 +742,7 @@ class CrossCoderEncoder(nn.Module):
     ) -> th.Tensor:  # (batch_size, activation_dim)
         """
         Convert multi-layer activations to dictionary features.
-        
+
         Applies layer-specific linear transformations to each layer's activations,
         sums across layers, adds bias, and applies ReLU activation.
 
@@ -748,7 +753,7 @@ class CrossCoderEncoder(nn.Module):
             normalize_activations: Whether to normalize input activations
             inplace_normalize: Whether to normalize activations in-place
             **kwargs: Additional keyword arguments (ignored)
-            
+
         Returns:
             If return_no_sum is False:
                 f: Dictionary features of shape (batch_size, dict_size)
@@ -776,10 +781,10 @@ class CrossCoderEncoder(nn.Module):
 class CrossCoderDecoder(nn.Module):
     """
     A crosscoder decoder that transforms dictionary features back to multi-layer activations.
-    
+
     This decoder reconstructs activations for multiple layers from a shared dictionary
     feature representation, applying layer-specific linear transformations.
-    
+
     Attributes:
         activation_dim: Dimension of output activations for each layer
         dict_size: Number of features in the dictionary
@@ -801,7 +806,7 @@ class CrossCoderDecoder(nn.Module):
     ):
         """
         Initialize the CrossCoder decoder.
-        
+
         Args:
             activation_dim: Dimension of the output activation vectors for each layer
             dict_size: Number of features in the dictionary
@@ -843,17 +848,17 @@ class CrossCoderDecoder(nn.Module):
         # f: (batch_size, n_layers, dict_size)
         """
         Convert dictionary features back to multi-layer activations.
-        
+
         Applies layer-specific linear transformations to convert dictionary features
         into activation representations for each layer.
 
         Args:
-            f: Dictionary features of shape (batch_size, dict_size) or 
+            f: Dictionary features of shape (batch_size, dict_size) or
                (batch_size, n_layers, dict_size)
             select_features: Optional list of feature indices to use (for efficiency)
             add_bias: Whether to add the decoder bias terms
             denormalize_activations: Whether to denormalize the output activations
-            
+
         Returns:
             x: Reconstructed activations of shape (batch_size, n_layers, activation_dim)
         """
@@ -941,16 +946,16 @@ class CodeNormalization(Enum):
 class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
     """
     A crosscoder sparse autoencoder for multi-layer activation processing.
-    
+
     CrossCoders process activations from multiple layers simultaneously, learning
     a shared dictionary of features that can reconstruct activations across all layers.
     This enables discovery of features that span multiple computational layers.
-    
+
     The architecture consists of:
     - Encoder: Maps multi-layer activations to dictionary features
     - Decoder: Reconstructs multi-layer activations from dictionary features
     - Optional latent processor: Transforms features between encoding and decoding
-    
+
     Args:
         activation_dim: Dimension of input activations for each layer
         dict_size: Number of features in the dictionary
@@ -985,7 +990,7 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
     ):
         """
         Initialize a CrossCoder sparse autoencoder.
-        
+
         Args:
             activation_dim: Dimension of input activations for each layer
             dict_size: Number of features in the dictionary
@@ -1091,7 +1096,11 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
         return weight_norm
 
     def encode(
-        self, x: th.Tensor, normalize_activations: bool = True, inplace_normalize: bool = False, **kwargs
+        self,
+        x: th.Tensor,
+        normalize_activations: bool = True,
+        inplace_normalize: bool = False,
+        **kwargs,
     ) -> th.Tensor:  # (batch_size, n_layers, dict_size)
         """
         Encode input activations to dictionary feature space.
@@ -1105,7 +1114,12 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
         Returns:
             Encoded features of shape (batch_size, dict_size)
         """
-        return self.encoder(x, normalize_activations=normalize_activations, inplace_normalize=inplace_normalize, **kwargs)
+        return self.encoder(
+            x,
+            normalize_activations=normalize_activations,
+            inplace_normalize=inplace_normalize,
+            **kwargs,
+        )
 
     def get_activations(
         self,
@@ -1157,7 +1171,9 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
             Reconstructed activations of shape (batch_size, n_layers, activation_dim)
         """
         # f: (batch_size, n_layers, dict_size)
-        return self.decoder(f, denormalize_activations=denormalize_activations, **kwargs)
+        return self.decoder(
+            f, denormalize_activations=denormalize_activations, **kwargs
+        )
 
     def forward(
         self, x: th.Tensor, output_features=False, normalize_activations: bool = True
@@ -1261,11 +1277,11 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
     def resample_neurons(self, deads, activations):
         """
         Resample dead neurons by reinitializing their weights.
-        
+
         Uses the resampling strategy from "Towards Monosemanticity" where dead neurons
         are reinitialized based on high-loss input examples. This helps recover neurons
         that have stopped activating during training.
-        
+
         Args:
             deads: Boolean tensor of shape (dict_size,) indicating dead neurons
             activations: Input activations of shape (batch_size, num_layers, activation_dim)
@@ -1306,17 +1322,17 @@ class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
 class BatchTopKCrossCoder(CrossCoder):
     """
     A CrossCoder variant that uses BatchTopK sparsity for feature selection.
-    
+
     This implementation selects the top-k most active features across the entire batch,
     rather than applying a fixed threshold. This ensures a consistent level of sparsity
     and can help with training stability.
-    
+
     Key features:
     - Adaptive thresholding based on activation statistics
     - Auxiliary loss for dead feature resurrection
     - Support for k-annealing (gradually reducing k during training)
     - Decoupled mode for per-layer thresholding
-    
+
     Args:
         activation_dim: Dimension of input activations for each layer
         dict_size: Number of features in the dictionary
@@ -1327,6 +1343,7 @@ class BatchTopKCrossCoder(CrossCoder):
         *args: Additional positional arguments passed to parent CrossCoder
         **kwargs: Additional keyword arguments passed to parent CrossCoder
     """
+
     def __init__(
         self,
         activation_dim: int,
@@ -1396,10 +1413,10 @@ class BatchTopKCrossCoder(CrossCoder):
             inplace_normalize: Whether to normalize activations in-place
 
         Returns:
-            If return_active is False: 
-                Encoded features tensor of shape (batch_size, dict_size) or 
+            If return_active is False:
+                Encoded features tensor of shape (batch_size, dict_size) or
                 (batch_size, num_layers, dict_size) for decoupled mode
-            If return_active is True: 
+            If return_active is True:
                 Tuple of (features, scaled_features, active_mask, post_relu_features, post_relu_scaled_features)
         """
         if normalize_activations:
@@ -1409,7 +1426,9 @@ class BatchTopKCrossCoder(CrossCoder):
                 x, return_active, use_threshold, select_features
             )
         batch_size = x.size(0)
-        post_relu_f = super().encode(x, select_features=select_features, normalize_activations=False)
+        post_relu_f = super().encode(
+            x, select_features=select_features, normalize_activations=False
+        )
         code_normalization = self.get_code_normalization(select_features)
         post_relu_f_scaled = post_relu_f * code_normalization
         if use_threshold:
@@ -1457,9 +1476,9 @@ class BatchTopKCrossCoder(CrossCoder):
             select_features: Optional list of feature indices to select
 
         Returns:
-            If return_active is False: 
+            If return_active is False:
                 Encoded features tensor of shape (batch_size, num_layers, dict_size)
-            If return_active is True: 
+            If return_active is True:
                 Tuple of (features, scaled_features, active_mask, post_relu_features, post_relu_scaled_features)
 
         Raises:
