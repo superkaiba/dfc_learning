@@ -11,13 +11,181 @@ from multiprocessing import Pool, Manager
 import time
 import json
 from .config import DEBUG
-from .utils import dtype_to_str, str_to_dtype, torch_to_numpy_dtype
-
+from .utils import (
+    dtype_to_str,
+    str_to_dtype,
+    torch_to_numpy_dtype,
+    ActivationNormalizer,
+)
 
 if DEBUG:
     tracer_kwargs = {"scan": True, "validate": True}
 else:
     tracer_kwargs = {"scan": False, "validate": False}
+
+import torch
+from typing import Tuple
+
+
+class RunningStatWelford:
+    """
+    Streaming (online) mean / variance with Welford's algorithm.
+
+    Works for arbitrary feature shapes – e.g. a vector of size D, a 2-D image
+    channel grid, … anything except that the first axis of the update batch
+    is interpreted as the *sample* axis.
+
+    Args:
+        shape: Feature shape tuple (e.g., (512,) for vector features)
+        dtype: Data type for internal computations
+        device: Device to store tensors on
+
+    Example:
+        stats = RunningStatWelford(shape=(512,), device="cuda")
+        for batch in dataloader:
+            stats.update(batch)          # batch.shape == (B, 512)
+
+        print(stats.mean)                # current running mean
+        print(stats.std(unbiased=True))  # sample std-dev (Bessel-corrected)
+    """
+
+    def __init__(
+        self,
+        shape: Tuple[int, ...],
+        dtype=torch.float64,
+        device: torch.device | str = "cpu",
+    ):
+        self.device = torch.device(device)
+        self.dtype = dtype
+
+        self.count = torch.tensor(0, dtype=torch.long, device=self.device)
+        self.mean = torch.zeros(shape, dtype=dtype, device=self.device)
+        self.M2 = torch.zeros(shape, dtype=dtype, device=self.device)
+
+    def save_state(self, store_dir: str):
+        """
+        Save the current state of the running statistics to a file.
+        """
+        torch.save(self.count.cpu(), os.path.join(store_dir, "count.pt"))
+        torch.save(self.mean.cpu(), os.path.join(store_dir, "mean.pt"))
+        torch.save(self.M2.cpu(), os.path.join(store_dir, "M2.pt"))
+
+    @staticmethod
+    def load_or_create_state(
+        store_dir: str,
+        dtype: torch.dtype = torch.float64,
+        device: torch.device | str = "cpu",
+        shape: Tuple[int, ...] = None,
+    ):
+        """
+        Load the current state of the running statistics from a file.
+        """
+        if os.path.exists(os.path.join(store_dir, "count.pt")):
+            count = torch.load(
+                os.path.join(store_dir, "count.pt"),
+                weights_only=True,
+                map_location=device,
+            )
+            mean = torch.load(
+                os.path.join(store_dir, "mean.pt"),
+                weights_only=True,
+                map_location=device,
+            )
+            M2 = torch.load(
+                os.path.join(store_dir, "M2.pt"), weights_only=True, map_location=device
+            )
+            return RunningStatWelford(
+                shape=mean.shape,
+                dtype=dtype,
+                device=device,
+                count=count,
+                mean=mean,
+                M2=M2,
+            )
+        else:
+            return RunningStatWelford(shape=shape, dtype=dtype, device=device)
+
+    def update(self, x: torch.Tensor) -> None:
+        """
+        Incorporate a new mini-batch `x` whose *first* dimension is batch-size.
+
+        Args:
+            x: Input tensor with batch dimension first
+        """
+        if x.numel() == 0:
+            return  # nothing to do
+
+        # ensure dtype/device match internal buffers
+        x = x.clone().to(device=self.device, dtype=self.dtype)
+
+        batch_n = x.shape[0]
+        batch_mean = x.mean(dim=0)
+        batch_M2 = ((x - batch_mean) ** 2).sum(dim=0)
+
+        delta = batch_mean - self.mean
+        total_n = self.count + batch_n
+
+        # merge step (Chan-Golub-LeVeque)
+        self.mean += delta * batch_n / total_n
+        self.M2 += batch_M2 + (delta**2) * self.count * batch_n / total_n
+        self.count = total_n
+
+    def merge(self, other: "RunningStatWelford") -> None:
+        """
+        Merge another (independent) accumulator into this one in O(1).
+        Useful for distributed training / multi-loader aggregation.
+
+        Args:
+            other: Another RunningStatWelford instance to merge
+        """
+        if other.count == 0:
+            return
+        if self.count == 0:
+            # shallow copy of buffers
+            self.count = other.count.clone()
+            self.mean = other.mean.clone()
+            self.M2 = other.M2.clone()
+            return
+
+        delta = other.mean - self.mean
+        total_n = self.count + other.count
+
+        self.mean += delta * other.count / total_n
+        self.M2 += other.M2 + (delta**2) * self.count * other.count / total_n
+        self.count = total_n
+
+    def var(self, unbiased: bool = True) -> torch.Tensor:
+        """
+        Return per-feature variance.
+
+        Args:
+            unbiased: If True, divide by (n-1) for sample variance (Bessel-corrected).
+                     If False, divide by n for population variance.
+
+        Returns:
+            Per-feature variance tensor
+        """
+        if self.count < (2 if unbiased else 1):
+            return torch.full_like(self.mean, float("nan"))
+        denom = self.count - 1 if unbiased else self.count
+        return self.M2 / denom
+
+    def std(self, unbiased: bool = True) -> torch.Tensor:
+        """
+        Standard deviation (sqrt of `var`).
+
+        Args:
+            unbiased: If True, use sample std-dev. If False, use population std-dev.
+
+        Returns:
+            Per-feature standard deviation tensor
+        """
+        return torch.sqrt(self.var(unbiased=unbiased))
+
+    @property
+    def n(self) -> int:
+        """Number of samples processed."""
+        return int(self.count.item())
 
 
 class ActivationShard:
@@ -100,6 +268,43 @@ class ActivationCache:
             self._tokens = th.load(
                 os.path.join(store_dir, "tokens.pt"), weights_only=True
             ).cpu()
+
+        self._mean = None
+        self._std = None
+
+    @property
+    def mean(self):
+        if self._mean is None:
+            if os.path.exists(os.path.join(self._cache_store_dir, "mean.pt")):
+                self._mean = th.load(
+                    os.path.join(self._cache_store_dir, "mean.pt"),
+                    weights_only=True,
+                    map_location=th.device("cpu"),
+                )
+            else:
+                raise ValueError(
+                    f"Mean not found for {self._cache_store_dir}. Re-run the collection script."
+                )
+        return self._mean
+
+    @property
+    def std(self):
+        if self._std is None:
+            if os.path.exists(os.path.join(self._cache_store_dir, "std.pt")):
+                self._std = th.load(
+                    os.path.join(self._cache_store_dir, "std.pt"),
+                    weights_only=True,
+                    map_location=th.device("cpu"),
+                )
+            else:
+                raise ValueError(
+                    f"Std not found for {self._cache_store_dir}. Re-run the collection script."
+                )
+        return self._std
+
+    @property
+    def normalizer(self):
+        return ActivationNormalizer(self.mean, self.std)
 
     def __len__(self):
         return self.config["total_size"]
@@ -277,6 +482,15 @@ class ActivationCache:
         ]
         for store_sub_dir in store_sub_dirs:
             os.makedirs(store_sub_dir, exist_ok=True)
+
+        # load running stats
+        running_stats = [
+            RunningStatWelford.load_or_create_state(
+                store_sub_dir, dtype, shape=(d_model,)
+            )
+            for store_sub_dir in store_sub_dirs
+        ]
+
         total_size = 0
         current_size = 0
         shard_count = 0
@@ -351,6 +565,7 @@ class ActivationCache:
                         .value[store_mask.reshape(-1).bool()]
                         .cpu()
                     )  # remove padding tokens
+                    running_stats[i].update(activation_cache[i][-1].view(-1, d_model))
                     if dtype is not None:
                         activation_cache[i][-1] = activation_cache[i][-1].to(dtype)
 
@@ -375,6 +590,8 @@ class ActivationCache:
                         io,
                         multiprocessing=multiprocessing,
                     )
+                    for i in range(len(submodules)):
+                        running_stats[i].save_state(store_sub_dirs[i])
                 shard_count += 1
 
                 total_size += current_size
@@ -400,6 +617,8 @@ class ActivationCache:
                     io,
                     multiprocessing=multiprocessing,
                 )
+                for i in range(len(submodules)):
+                    running_stats[i].save_state(store_sub_dirs[i])
             shard_count += 1
             total_size += current_size
 
@@ -430,6 +649,15 @@ class ActivationCache:
             ), f"{tokens_cache.shape[0]} != {total_size}"
             th.save(tokens_cache, os.path.join(store_dir, "tokens.pt"))
 
+        # store running stats
+        for i in range(len(submodules)):
+            th.save(
+                running_stats[i].mean.cpu(), os.path.join(store_sub_dirs[i], "mean.pt")
+            )
+            th.save(
+                running_stats[i].std().cpu(), os.path.join(store_sub_dirs[i], "std.pt")
+            )
+
         ActivationCache.cleanup_multiprocessing()
         print(f"Finished collecting activations. Total size: {total_size}")
 
@@ -454,11 +682,27 @@ class PairedActivationCache:
             (self.activation_cache_1.tokens, self.activation_cache_2.tokens), dim=0
         )
 
+    @property
+    def mean(self):
+        return th.stack(
+            (self.activation_cache_1.mean, self.activation_cache_2.mean), dim=0
+        )
+
+    @property
+    def std(self):
+        return th.stack(
+            (self.activation_cache_1.std, self.activation_cache_2.std), dim=0
+        )
+
+    @property
+    def normalizer(self):
+        return ActivationNormalizer(self.mean, self.std)
+
 
 class ActivationCacheTuple:
-    def __init__(self, *store_dirs: str):
+    def __init__(self, *store_dirs: str, submodule_name: str = None):
         self.activation_caches = [
-            ActivationCache(store_dir) for store_dir in store_dirs
+            ActivationCache(store_dir, submodule_name) for store_dir in store_dirs
         ]
         assert len(self.activation_caches) > 0
         for i in range(1, len(self.activation_caches)):
@@ -473,3 +717,15 @@ class ActivationCacheTuple:
     @property
     def tokens(self):
         return th.stack([cache.tokens for cache in self.activation_caches], dim=0)
+
+    @property
+    def mean(self):
+        return th.stack([cache.mean for cache in self.activation_caches], dim=0)
+
+    @property
+    def std(self):
+        return th.stack([cache.std for cache in self.activation_caches], dim=0)
+
+    @property
+    def normalizer(self):
+        return ActivationNormalizer(self.mean, self.std)

@@ -8,11 +8,36 @@ from ..dictionary import CrossCoder, BatchTopKCrossCoder
 from collections import namedtuple
 from typing import Optional
 from ..trainers.trainer import get_lr_schedule
+from ..utils import ActivationNormalizer
 
 
 class CrossCoderTrainer(SAETrainer):
     """
-    Standard SAE training scheme for cross-coding.
+
+    This trainer implements the CrossCoder training methodology. It supports multi-layer crosscoders with
+    configurable sparsity penalties, learning rate scheduling, and optional neuron
+    resampling to handle dead neurons.
+
+    Args:
+        dict_class: The CrossCoder class to use (default: CrossCoder)
+        num_layers: Number of layers in the crosscoder (default: 2)
+        activation_dim: Dimension of input activations (default: 512)
+        dict_size: Size of the dictionary/number of features (default: 64 * 512)
+        lr: Learning rate for optimization (default: 1e-3)
+        l1_penalty: L1 sparsity penalty coefficient (default: 1e-1)
+        warmup_steps: Number of warmup steps for learning rate schedule (default: 1000)
+        resample_steps: How often to resample dead neurons (default: None, no resampling)
+        seed: Random seed for reproducibility (default: None)
+        device: Device to run on (default: None, auto-detect)
+        layer: Layer index in the language model (required)
+        lm_name: Name of the language model (required)
+        wandb_name: Name for wandb logging (default: "CrossCoderTrainer")
+        submodule_name: Specific submodule name within the layer (default: None)
+        compile: Whether to compile the model with torch.compile (default: False)
+        dict_class_kwargs: Additional arguments for the dictionary class (default: {})
+        pretrained_ae: Pre-trained autoencoder to use instead of initializing new one (default: None)
+        use_mse_loss: Whether to use MSE loss instead of L2 loss for reconstruction (default: False)
+        activation_normalizer: Optional activation normalizer (default: None)
     """
 
     def __init__(
@@ -35,6 +60,7 @@ class CrossCoderTrainer(SAETrainer):
         dict_class_kwargs={},
         pretrained_ae=None,
         use_mse_loss=False,
+        activation_normalizer: ActivationNormalizer | None = None,
     ):
         super().__init__(seed)
 
@@ -51,7 +77,11 @@ class CrossCoderTrainer(SAETrainer):
         # initialize dictionary
         if pretrained_ae is None:
             self.ae = dict_class(
-                activation_dim, dict_size, num_layers=num_layers, **dict_class_kwargs
+                activation_dim,
+                dict_size,
+                num_layers=num_layers,
+                activation_normalizer=activation_normalizer,
+                **dict_class_kwargs,
             )
         else:
             self.ae = pretrained_ae
@@ -97,6 +127,13 @@ class CrossCoderTrainer(SAETrainer):
         )
 
     def resample_neurons(self, deads, activations):
+        """
+        Resample dead neurons by reinitializing their weights and resetting optimizer state.
+
+        Args:
+            deads: Boolean tensor indicating which neurons are dead
+            activations: Input activations used for resampling
+        """
         with th.no_grad():
             if deads.sum() == 0:
                 return
@@ -113,8 +150,25 @@ class CrossCoderTrainer(SAETrainer):
             state_dict[3]["exp_avg"][:, deads, :] = 0.0
             state_dict[3]["exp_avg_sq"][:, deads, :] = 0.0
 
-    def loss(self, x, logging=False, return_deads=False, **kwargs):
-        x_hat, f = self.ae(x, output_features=True)
+    def loss(
+        self, x, logging=False, return_deads=False, normalize_activations=True, **kwargs
+    ):
+        """
+        Compute the training loss including reconstruction and sparsity terms.
+
+        Args:
+            x: Input activations (batch_size, num_layers, activation_dim)
+            logging: Whether to return detailed logging information
+            return_deads: Whether to return dead neuron information
+            normalize_activations: Whether to normalize activations before processing
+            **kwargs: Additional keyword arguments
+
+        Returns:
+            If logging=False: Total loss tensor
+            If logging=True: Named tuple with detailed loss breakdown and intermediate values
+        """
+        x = self.ae.normalize_activations(x) if normalize_activations else x
+        x_hat, f = self.ae(x, output_features=True, normalize_activations=False)
         l2_loss = th.linalg.norm(x - x_hat, dim=-1).mean()
         mse_loss = (x - x_hat).pow(2).sum(dim=-1).mean()
         if self.use_mse_loss:
@@ -147,10 +201,19 @@ class CrossCoderTrainer(SAETrainer):
             )
 
     def update(self, step, activations):
-        activations = activations.to(self.device)
+        """
+        Perform a single training step.
 
+        Args:
+            step: Current training step number
+            activations: Input activations for this step (batch_size, num_layers, activation_dim)
+        """
+        activations = activations.to(self.device)
+        activations = self.ae.normalize_activations(
+            activations
+        )  # Normalize here to make sure future code is using the normalized activations
         self.optimizer.zero_grad()
-        loss = self.loss(activations, step=step)
+        loss = self.loss(activations, step=step, normalize_activations=False)
         loss.backward()
         self.optimizer.step()
         self.scheduler.step()
@@ -162,6 +225,12 @@ class CrossCoderTrainer(SAETrainer):
 
     @property
     def config(self):
+        """
+        Get the trainer configuration as a dictionary.
+
+        Returns:
+            Dictionary containing all trainer configuration parameters
+        """
         return {
             "dict_class": (
                 self.ae.__class__.__name__
@@ -188,6 +257,38 @@ class CrossCoderTrainer(SAETrainer):
 
 
 class BatchTopKCrossCoderTrainer(SAETrainer):
+    """
+    Batch Top-K crosscoder trainer implementation.
+
+    This trainer implements a BatchTopK sparsity constraint for CrossCoders, with adaptive thresholding, auxiliary loss for dead feature
+    resurrection, and k-annealing capabilities.
+
+    Args:
+        steps: Total number of training steps
+        activation_dim: Dimension of input activations
+        dict_size: Size of the dictionary/number of features
+        k: Target number of active features per example
+        layer: Layer index in the language model
+        lm_name: Name of the language model
+        num_layers: Number of layers in the crosscoder (default: 2)
+        k_max: Initial k value for annealing (default: None, uses k)
+        k_annealing_steps: Number of steps to anneal k from k_max to k (default: 0)
+        dict_class: The crosscoder class to use (default: BatchTopKCrossCoder)
+        lr: Learning rate, auto-computed if None (default: None)
+        auxk_alpha: Weight for auxiliary loss (default: 1/32)
+        warmup_steps: Number of warmup steps (default: 1000)
+        decay_start: When learning rate decay starts (default: None)
+        threshold_beta: Beta parameter for threshold EMA (default: 0.999)
+        threshold_start_step: When to start threshold updates (default: 1000)
+        seed: Random seed for reproducibility (default: None)
+        device: Device to run on (default: None, auto-detect)
+        wandb_name: Name for wandb logging (default: "BatchTopKSAE")
+        submodule_name: Specific submodule name within the layer (default: None)
+        pretrained_ae: Pre-trained autoencoder (default: None)
+        dict_class_kwargs: Additional arguments for the dictionary class (default: {})
+        activation_normalizer: Optional activation normalizer (default: None)
+    """
+
     def __init__(
         self,
         steps: int,  # total number of steps to train for
@@ -212,6 +313,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         submodule_name: Optional[str] = None,
         pretrained_ae: Optional[BatchTopKCrossCoder] = None,
         dict_class_kwargs: dict = {},
+        activation_normalizer: ActivationNormalizer | None = None,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -242,6 +344,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
                 dict_size,
                 num_layers,
                 self.k_initial,
+                activation_normalizer=activation_normalizer,
                 **dict_class_kwargs,
             )
         else:
@@ -291,7 +394,19 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         post_relu_f_scaled: th.Tensor,
     ):
         """
-        Compute an auxk loss similar than the one in TopK and BatchTopKSAE. This loss is tries to make dead latents alive again.
+        Compute auxiliary loss to resurrect dead features.
+
+        This implements an auxk loss similar to TopK and BatchTopKSAE that attempts
+        to make dead latents active again by computing reconstruction loss on the
+        top-k dead features.
+
+        Args:
+            residual_BD: Residual tensor (batch_size, num_layers, model_dim)
+            post_relu_f: Post-ReLU feature activations
+            post_relu_f_scaled: Scaled post-ReLU feature activations
+
+        Returns:
+            Normalized auxiliary loss tensor
         """
         batch_size, num_layers, model_dim = residual_BD.size()
         # reshape to (batch_size, num_layers*model_dim)
@@ -345,6 +460,12 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             return th.tensor(0, dtype=residual_BD.dtype, device=residual_BD.device)
 
     def update_threshold(self, f_scaled: th.Tensor):
+        """
+        Update the activation threshold using exponential moving average.
+
+        Args:
+            f_scaled: Scaled feature activations
+        """
         if self.ae.decoupled_code:
             return self.update_decoupled_threshold(f_scaled)
         active = f_scaled[f_scaled > 0]
@@ -362,6 +483,12 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             )
 
     def update_decoupled_threshold(self, f_scaled: th.Tensor):
+        """
+        Update thresholds for decoupled code normalization (per-layer thresholds).
+
+        Args:
+            f_scaled: Scaled feature activations
+        """
         min_activation_f = (
             f_scaled.clone().transpose(0, 1).reshape(self.ae.num_layers, -1)
         )
@@ -377,7 +504,31 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
                     self.threshold_beta * self.ae.threshold[layer]
                 ) + ((1 - self.threshold_beta) * min_activations[layer])
 
-    def loss(self, x, step=None, logging=False, use_threshold=False, **kwargs):
+    def loss(
+        self,
+        x,
+        step=None,
+        logging=False,
+        use_threshold=False,
+        normalize_activations=True,
+        **kwargs,
+    ):
+        """
+        Compute the training loss with reconstruction and auxiliary terms.
+
+        Args:
+            x: Input activations (batch_size, num_layers, activation_dim)
+            step: Current training step (used for k-annealing)
+            logging: Whether to return detailed logging information
+            use_threshold: Whether to use thresholding during encoding
+            normalize_activations: Whether to normalize activations before processing
+            **kwargs: Additional keyword arguments
+
+        Returns:
+            If logging=False: Total loss tensor
+            If logging=True: Named tuple with detailed loss breakdown and intermediate values
+        """
+        x = self.ae.normalize_activations(x) if normalize_activations else x
         if step is not None:
             # Update k for annealing if applicable
             if self.k_annealing_total_steps > 0 and self.k_initial != self.k_target:
@@ -402,7 +553,10 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         self.k_current_value = self.ae.k.item()
 
         f, f_scaled, active_indices_F, post_relu_f, post_relu_f_scaled = self.ae.encode(
-            x, return_active=True, use_threshold=use_threshold
+            x,
+            return_active=True,
+            use_threshold=use_threshold,
+            normalize_activations=False,
         )  # (batch_size, dict_size)
         # l0 = (f != 0).float().sum(dim=-1).mean().item()
 
@@ -446,14 +600,25 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             )
 
     def update(self, step, x):
+        """
+        Perform a single training step.
+
+        Args:
+            step: Current training step number
+            x: Input activations for this step (batch_size, num_layers, activation_dim)
+
+        Returns:
+            Loss value as float
+        """
         x = x.to(self.device)
+        x = self.ae.normalize_activations(x)
         if step == 0:
             median = self.geometric_median(x)
             median = median.to(self.device)
             self.ae.decoder.bias.data = median
 
         x = x.to(self.device)
-        loss = self.loss(x, step=step)
+        loss = self.loss(x, step=step, normalize_activations=False)
         loss.backward()
 
         th.nn.utils.clip_grad_norm_(self.ae.parameters(), 1.0)
@@ -466,6 +631,12 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
 
     @property
     def config(self):
+        """
+        Get the trainer configuration as a dictionary.
+
+        Returns:
+            Dictionary containing all trainer configuration parameters
+        """
         return {
             "trainer_class": "BatchTopKCrossCoderTrainer",
             "dict_class": "BatchTopKCrossCoder",
@@ -497,6 +668,20 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
 
     @staticmethod
     def geometric_median(points: th.Tensor, max_iter: int = 100, tol: float = 1e-5):
+        """
+        Compute the geometric median of a set of points.
+
+        The geometric median is the point that minimizes the sum of distances to all points.
+        This is used to initialize the decoder bias to a robust estimate of the data center.
+
+        Args:
+            points: Tensor of shape (num_points, num_layers, model_dim)
+            max_iter: Maximum number of iterations for the iterative algorithm
+            tol: Tolerance for convergence
+
+        Returns:
+            Geometric median tensor of shape (num_layers, model_dim)
+        """
         # points.shape = (num_points, num_layers, model_dim)
         guess = points.mean(dim=0)
         prev = th.zeros_like(guess)

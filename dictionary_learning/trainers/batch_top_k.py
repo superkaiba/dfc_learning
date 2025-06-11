@@ -8,6 +8,7 @@ from ..trainers.trainer import (
     get_lr_schedule,
     set_decoder_norm_to_unit_norm,
     remove_gradient_parallel_to_decoder_directions,
+    ActivationNormalizer,
 )
 
 
@@ -31,6 +32,7 @@ class BatchTopKTrainer(SAETrainer):
         device: Optional[str] = None,
         wandb_name: str = "BatchTopKSAE",
         submodule_name: Optional[str] = None,
+        activation_normalizer: ActivationNormalizer | None = None,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -49,7 +51,9 @@ class BatchTopKTrainer(SAETrainer):
             t.manual_seed(seed)
             t.cuda.manual_seed_all(seed)
 
-        self.ae = dict_class(activation_dim, dict_size, k)
+        self.ae = dict_class(
+            activation_dim, dict_size, k, activation_normalizer=activation_normalizer
+        )
 
         if device is None:
             self.device = "cuda" if t.cuda.is_available() else "cpu"
@@ -144,9 +148,21 @@ class BatchTopKTrainer(SAETrainer):
                     (1 - self.threshold_beta) * min_activation
                 )
 
-    def loss(self, x, step=None, logging=False, use_threshold=False, **kwargs):
+    def loss(
+        self,
+        x,
+        step=None,
+        logging=False,
+        use_threshold=False,
+        normalize_activations=True,
+        **kwargs,
+    ):
+        x = self.ae.normalize_activations(x) if normalize_activations else x
         f, active_indices_F, post_relu_acts_BF = self.ae.encode(
-            x, return_active=True, use_threshold=use_threshold
+            x,
+            return_active=True,
+            use_threshold=use_threshold,
+            normalize_activations=False,
         )
 
         if step > self.threshold_start_step:
@@ -190,7 +206,10 @@ class BatchTopKTrainer(SAETrainer):
             self.ae.b_dec.data = median
 
         x = x.to(self.device)
-        loss = self.loss(x, step=step)
+        x = self.ae.normalize_activations(
+            x
+        )  # Normalize here to make sure later code is using the normalized activations
+        loss = self.loss(x, step=step, normalize_activations=False)
         loss.backward()
 
         self.ae.decoder.weight.grad = remove_gradient_parallel_to_decoder_directions(
