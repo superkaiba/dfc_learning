@@ -348,7 +348,13 @@ class JumpReluAutoEncoder(Dictionary, nn.Module):
 
 
 class BatchTopKSAE(Dictionary, nn.Module):
-    def __init__(self, activation_dim: int, dict_size: int, k: int, activation_normalizer: ActivationNormalizer | None = None):
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        k: int,
+        activation_normalizer: ActivationNormalizer | None = None,
+    ):
         super().__init__()
         self.activation_dim = activation_dim
         self.dict_size = dict_size
@@ -371,7 +377,11 @@ class BatchTopKSAE(Dictionary, nn.Module):
         self.b_dec = nn.Parameter(th.zeros(activation_dim))
 
     def encode(
-        self, x: th.Tensor, return_active: bool = False, use_threshold: bool = True, normalize_activations: bool = True
+        self,
+        x: th.Tensor,
+        return_active: bool = False,
+        use_threshold: bool = True,
+        normalize_activations: bool = True,
     ):
         if normalize_activations:
             x = self.normalize_activations(x)
@@ -405,7 +415,12 @@ class BatchTopKSAE(Dictionary, nn.Module):
             return self.activation_normalizer(x)
         return x
 
-    def forward(self, x: th.Tensor, output_features: bool = False, normalize_activations: bool = True):
+    def forward(
+        self,
+        x: th.Tensor,
+        output_features: bool = False,
+        normalize_activations: bool = True,
+    ):
         encoded_acts_BF = self.encode(x, normalize_activations=normalize_activations)
         x_hat_BD = self.decode(encoded_acts_BF)
 
@@ -983,7 +998,6 @@ class CrossCoder(Dictionary, nn.Module):
                 )
         num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
 
-
         crosscoder = cls(
             activation_dim,
             dict_size,
@@ -1093,7 +1107,7 @@ class BatchTopKCrossCoder(CrossCoder):
 
         Returns:
             If return_active is False: encoded features tensor
-            If return_active is True: tuple of (features, scaled_features, active_mask, 
+            If return_active is True: tuple of (features, scaled_features, active_mask,
                                                post_relu_features, post_relu_scaled_features)
         """
         if normalize_activations:
@@ -1151,7 +1165,7 @@ class BatchTopKCrossCoder(CrossCoder):
 
         Returns:
             If return_active is False: encoded features tensor of shape (batch_size, num_layers, dict_size)
-            If return_active is True: tuple of (features, scaled_features, active_mask, 
+            If return_active is True: tuple of (features, scaled_features, active_mask,
                                                post_relu_features, post_relu_scaled_features)
 
         Raises:
@@ -1228,7 +1242,12 @@ class BatchTopKCrossCoder(CrossCoder):
             return f
 
     def get_activations(
-        self, x: th.Tensor, use_threshold: bool = True, select_features=None, normalize_activations: bool = True, **kwargs
+        self,
+        x: th.Tensor,
+        use_threshold: bool = True,
+        select_features=None,
+        normalize_activations: bool = True,
+        **kwargs,
     ):
         """
         Get scaled feature activations for the input.
@@ -1314,7 +1333,7 @@ class BatchTopKCrossCoder(CrossCoder):
             ), f"k in kwargs ({kwargs['k']}) does not match k in state_dict ({state_dict['k']})"
             kwargs.pop("k")
         kwargs.update()
-       
+
         crosscoder = cls(
             activation_dim,
             dict_size,

@@ -7,7 +7,7 @@ from dictionary_learning.cache import RunningStatWelford
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-@pytest.mark.parametrize("D", [5, 127])          # feature dimensionalities
+@pytest.mark.parametrize("D", [5, 127])  # feature dimensionalities
 def test_streaming_matches_reference(dtype, D):
     """
     Stream random data through RunningStatWelford in random-sized batches
@@ -30,11 +30,11 @@ def test_streaming_matches_reference(dtype, D):
 
     # Ground-truth (double precision to remove numeric noise)
     ref_mean = full.double().mean(dim=0)
-    ref_std  = full.double().std(dim=0, unbiased=True)
+    ref_std = full.double().std(dim=0, unbiased=True)
 
     # Compare
     torch.testing.assert_close(acc.mean, ref_mean, rtol=1e-6, atol=1e-7)
-    torch.testing.assert_close(acc.std(),  ref_std,  rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(acc.std(), ref_std, rtol=1e-6, atol=1e-7)
     assert acc.n == N_total
 
 
@@ -60,10 +60,10 @@ def test_merge_two_accumulators():
 
     # Reference
     ref_mean = data.double().mean(dim=0)
-    ref_std  = data.double().std(dim=0, unbiased=True)
+    ref_std = data.double().std(dim=0, unbiased=True)
 
     torch.testing.assert_close(acc1.mean, ref_mean, rtol=1e-6, atol=1e-7)
-    torch.testing.assert_close(acc1.std(),  ref_std,  rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(acc1.std(), ref_std, rtol=1e-6, atol=1e-7)
     assert acc1.n == N_total
 
 
@@ -87,4 +87,6 @@ def test_edge_cases():
     acc.update(torch.tensor([[2.0, 4.0, 6.0]], dtype=dtype))
     assert acc.n == 2
     torch.testing.assert_close(acc.mean, torch.tensor([1.5, 3.0, 4.5], dtype=dtype))
-    torch.testing.assert_close(acc.std(), torch.tensor([0.70710678, 1.41421356, 2.12132034], dtype=dtype))
+    torch.testing.assert_close(
+        acc.std(), torch.tensor([0.70710678, 1.41421356, 2.12132034], dtype=dtype)
+    )
