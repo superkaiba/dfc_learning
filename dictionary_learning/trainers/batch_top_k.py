@@ -155,9 +155,14 @@ class BatchTopKTrainer(SAETrainer):
         logging=False,
         use_threshold=False,
         normalize_activations=True,
+        inplace_normalize=True,
         **kwargs,
     ):
-        x = self.ae.normalize_activations(x) if normalize_activations else x
+        x = (
+            self.ae.normalize_activations(x, inplace=inplace_normalize)
+            if normalize_activations
+            else x
+        )
         f, active_indices_F, post_relu_acts_BF = self.ae.encode(
             x,
             return_active=True,
@@ -168,7 +173,7 @@ class BatchTopKTrainer(SAETrainer):
         if step > self.threshold_start_step:
             self.update_threshold(f)
 
-        x_hat = self.ae.decode(f)
+        x_hat = self.ae.decode(f, denormalize_activations=normalize_activations)
 
         e = x - x_hat
 
@@ -207,8 +212,9 @@ class BatchTopKTrainer(SAETrainer):
 
         x = x.to(self.device)
         x = self.ae.normalize_activations(
-            x
-        )  # Normalize here to make sure later code is using the normalized activations
+            x,
+            inplace_normalize=True,  # Normalize inplace to avoid copying the activations during training
+        )
         loss = self.loss(x, step=step, normalize_activations=False)
         loss.backward()
 

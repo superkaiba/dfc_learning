@@ -131,5 +131,12 @@ class ActivationNormalizer(th.nn.Module):
         self.register_buffer("mean", mean)
         self.register_buffer("std", std)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def normalize(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
+        if not inplace:
+            x = x.clone()
         return (x - self.mean) / (self.std + 1e-8)
+
+    def denormalize(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
+        if not inplace:
+            x = x.clone()
+        return x * (self.std + 1e-8) + self.mean

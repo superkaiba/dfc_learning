@@ -1,5 +1,5 @@
 """
-Implements the standard SAE training scheme.
+Implements the CrossCoder training scheme.
 """
 
 import torch as th
@@ -13,10 +13,10 @@ from ..utils import ActivationNormalizer
 
 class CrossCoderTrainer(SAETrainer):
     """
+    Trainer for CrossCoder sparse autoencoders.
 
     This trainer implements the CrossCoder training methodology. It supports multi-layer crosscoders with
-    configurable sparsity penalties, learning rate scheduling, and optional neuron
-    resampling to handle dead neurons.
+    configurable sparsity penalties, learning rate scheduling, and optional neuron resampling to handle dead neurons.
 
     Args:
         dict_class: The CrossCoder class to use (default: CrossCoder)
@@ -151,7 +151,7 @@ class CrossCoderTrainer(SAETrainer):
             state_dict[3]["exp_avg_sq"][:, deads, :] = 0.0
 
     def loss(
-        self, x, logging=False, return_deads=False, normalize_activations=True, **kwargs
+        self, x, logging=False, return_deads=False, normalize_activations=True, inplace_normalize=True, **kwargs
     ):
         """
         Compute the training loss including reconstruction and sparsity terms.
@@ -161,13 +161,14 @@ class CrossCoderTrainer(SAETrainer):
             logging: Whether to return detailed logging information
             return_deads: Whether to return dead neuron information
             normalize_activations: Whether to normalize activations before processing
+            inplace_normalize: Whether to normalize activations in-place
             **kwargs: Additional keyword arguments
 
         Returns:
             If logging=False: Total loss tensor
             If logging=True: Named tuple with detailed loss breakdown and intermediate values
         """
-        x = self.ae.normalize_activations(x) if normalize_activations else x
+        x = self.ae.normalize_activations(x, inplace=inplace_normalize) if normalize_activations else x
         x_hat, f = self.ae(x, output_features=True, normalize_activations=False)
         l2_loss = th.linalg.norm(x - x_hat, dim=-1).mean()
         mse_loss = (x - x_hat).pow(2).sum(dim=-1).mean()
@@ -210,8 +211,9 @@ class CrossCoderTrainer(SAETrainer):
         """
         activations = activations.to(self.device)
         activations = self.ae.normalize_activations(
-            activations
-        )  # Normalize here to make sure future code is using the normalized activations
+            activations,
+            inplace=True, # Normalize inplace to avoid copying the activations during training
+        )  
         self.optimizer.zero_grad()
         loss = self.loss(activations, step=step, normalize_activations=False)
         loss.backward()
@@ -258,7 +260,7 @@ class CrossCoderTrainer(SAETrainer):
 
 class BatchTopKCrossCoderTrainer(SAETrainer):
     """
-    Batch Top-K crosscoder trainer implementation.
+    Trainer for BatchTopK CrossCoder sparse autoencoders.
 
     This trainer implements a BatchTopK sparsity constraint for CrossCoders, with adaptive thresholding, auxiliary loss for dead feature
     resurrection, and k-annealing capabilities.
@@ -511,6 +513,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         logging=False,
         use_threshold=False,
         normalize_activations=True,
+        inplace_normalize=True,
         **kwargs,
     ):
         """
@@ -522,13 +525,14 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             logging: Whether to return detailed logging information
             use_threshold: Whether to use thresholding during encoding
             normalize_activations: Whether to normalize activations before processing
+            inplace_normalize: Whether to normalize activations in-place
             **kwargs: Additional keyword arguments
 
         Returns:
             If logging=False: Total loss tensor
             If logging=True: Named tuple with detailed loss breakdown and intermediate values
         """
-        x = self.ae.normalize_activations(x) if normalize_activations else x
+        x = self.ae.normalize_activations(x, inplace=inplace_normalize) if normalize_activations else x
         if step is not None:
             # Update k for annealing if applicable
             if self.k_annealing_total_steps > 0 and self.k_initial != self.k_target:
@@ -563,7 +567,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         if step > self.threshold_start_step and not logging:
             self.update_threshold(f_scaled)
 
-        x_hat = self.ae.decode(f)
+        x_hat = self.ae.decode(f, denormalize_activations=False)
 
         e = x - x_hat
         assert e.shape == x.shape
@@ -611,7 +615,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             Loss value as float
         """
         x = x.to(self.device)
-        x = self.ae.normalize_activations(x)
+        x = self.ae.normalize_activations(x, inplace=True) # Normalize inplace to avoid copying the activations during training
         if step == 0:
             median = self.geometric_median(x)
             median = median.to(self.device)
