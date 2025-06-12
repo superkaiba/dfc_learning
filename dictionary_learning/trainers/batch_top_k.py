@@ -8,8 +8,8 @@ from ..trainers.trainer import (
     get_lr_schedule,
     set_decoder_norm_to_unit_norm,
     remove_gradient_parallel_to_decoder_directions,
-    ActivationNormalizer,
 )
+from ..dictionary import ActivationNormalizer
 
 
 class BatchTopKTrainer(SAETrainer):

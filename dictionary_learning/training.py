@@ -9,6 +9,7 @@ import torch as th
 from tqdm import tqdm
 from warnings import warn
 import wandb
+from typing import List, Optional
 
 from .trainers.crosscoder import CrossCoderTrainer, BatchTopKCrossCoderTrainer
 
@@ -67,6 +68,14 @@ def get_stats(
     out["frac_variance_explained"] = frac_variance_explained.item()
     return out
 
+def get_model(trainer):
+    if hasattr(trainer, "ae"):
+        model = trainer.ae
+    else:
+        model = trainer.model
+    if hasattr(model, "_orig_mod"):  # Check if model is compiled
+        model = model._orig_mod
+    return model
 
 def log_stats(
     trainer,
@@ -76,6 +85,7 @@ def log_stats(
     transcoder: bool,
     stage: str = "train",
     use_threshold: bool = True,
+    epoch_idx_per_step: Optional[List[int]] = None,
 ):
     with th.no_grad():
         log = {}
@@ -96,8 +106,7 @@ def log_stats(
         for name, value in trainer_log.items():
             log[f"{stage}/{name}"] = value
 
-        wandb.log(log, step=step)
-
+        wandb.log(log, step=step, epoch=epoch_idx_per_step[step] if epoch_idx_per_step is not None else None)
 
 @th.no_grad()
 def run_validation(
@@ -105,6 +114,7 @@ def run_validation(
     validation_data,
     step: int = None,
     dtype: th.dtype = th.float32,
+    epoch_idx_per_step: Optional[List[int]] = None,
 ):
     l0 = []
     frac_variance_explained = []
@@ -167,24 +177,15 @@ def run_validation(
             ).mean()
     if step is not None:
         log["step"] = step
-    wandb.log(log, step=step)
+    wandb.log(log, step=step, epoch=epoch_idx_per_step[step] if epoch_idx_per_step is not None else None)
 
     return log
 
 
 def save_model(trainer, checkpoint_name, save_dir):
     os.makedirs(save_dir, exist_ok=True)
-    # Handle the case where the model might be compiled
-    if hasattr(trainer, "ae"):
-        model = trainer.ae
-        if hasattr(model, "_orig_mod"):  # Check if model is compiled
-            model = model._orig_mod
-        th.save(model.state_dict(), os.path.join(save_dir, checkpoint_name))
-    else:
-        model = trainer.model
-        if hasattr(model, "_orig_mod"):  # Check if model is compiled
-            model = model._orig_mod
-        th.save(model.state_dict(), os.path.join(save_dir, checkpoint_name))
+    model = get_model(trainer)
+    th.save(model.state_dict(), os.path.join(save_dir, checkpoint_name))
 
 
 def trainSAE(
@@ -206,9 +207,39 @@ def trainSAE(
     save_last_eval=True,
     start_of_training_eval=False,
     dtype=th.float32,
+    run_wandb_finish=True,
+    epoch_idx_per_step: Optional[List[int]] = None,
 ):
     """
     Train SAE using the given trainer
+    
+    Args:
+        data: Training data iterator/dataloader
+        trainer_config: Configuration dictionary for the trainer
+        use_wandb: Whether to use Weights & Biases logging (default: False)
+        wandb_entity: W&B entity name (default: "")
+        wandb_project: W&B project name (default: "")
+        steps: Maximum number of training steps (default: None)
+        save_steps: Frequency of model checkpointing (default: None)
+        save_dir: Directory to save checkpoints and config (default: None)
+        log_steps: Frequency of logging statistics (default: None)
+        activations_split_by_head: Whether activations are split by attention head (default: False)
+        validate_every_n_steps: Frequency of validation evaluation (default: None)
+        validation_data: Validation data iterator/dataloader (default: None)
+        transcoder: Whether training a transcoder model (default: False)
+        run_cfg: Additional run configuration (default: {})
+        end_of_step_logging_fn: Custom logging function called at end of each step (default: None)
+        save_last_eval: Whether to save evaluation results at end of training (default: True)
+        start_of_training_eval: Whether to run evaluation before training starts (default: False)
+        dtype: Training data type (default: torch.float32)
+        run_wandb_finish: Whether to call wandb.finish() at end of training (default: True)
+        epoch_idx_per_step: Optional mapping of training steps to epoch indices (default: None). Mainly used for logging when the dataset is pre-shuffled and contains multiple epochs.
+    
+    Returns:
+        Trained model
+        
+    Raises:
+        AssertionError: If validation_data is None but validate_every_n_steps is specified
     """
     assert not (
         validation_data is None and validate_every_n_steps is not None
@@ -229,7 +260,7 @@ def trainSAE(
 
     trainer.model.to(dtype)
 
-    # make save dir, export config
+    # make save dir, export config  
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
         # save config
@@ -257,6 +288,7 @@ def trainSAE(
                     activations_split_by_head,
                     transcoder,
                     use_threshold=False,
+                    epoch_idx_per_step=epoch_idx_per_step,
                 )
                 if isinstance(trainer, BatchTopKCrossCoderTrainer):
                     log_stats(
@@ -267,6 +299,7 @@ def trainSAE(
                         transcoder,
                         use_threshold=True,
                         stage="trainthres",
+                        epoch_idx_per_step=epoch_idx_per_step,
                     )
 
         # saving
@@ -284,7 +317,7 @@ def trainSAE(
             and (start_of_training_eval or step > 0)
         ):
             print(f"Validating at step {step}")
-            logs = run_validation(trainer, validation_data, step=step, dtype=dtype)
+            logs = run_validation(trainer, validation_data, step=step, dtype=dtype, epoch_idx_per_step=epoch_idx_per_step)
             try:
                 os.makedirs(save_dir, exist_ok=True)
                 th.save(logs, os.path.join(save_dir, f"eval_logs_{step}.pt"))
@@ -295,7 +328,7 @@ def trainSAE(
             end_of_step_logging_fn(trainer, step)
     try:
         last_eval_logs = run_validation(
-            trainer, validation_data, step=step, dtype=dtype
+            trainer, validation_data, step=step, dtype=dtype, epoch_idx_per_step=epoch_idx_per_step
         )
         if save_last_eval:
             os.makedirs(save_dir, exist_ok=True)
@@ -307,5 +340,7 @@ def trainSAE(
     if save_dir is not None:
         save_model(trainer, f"model_final.pt", save_dir)
 
-    if use_wandb:
+    if use_wandb and run_wandb_finish:
         wandb.finish()
+
+    return get_model(trainer)
