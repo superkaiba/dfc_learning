@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from .utils import set_decoder_norm_to_unit_norm, ActivationNormalizer
 
 
-class NormalizableMixin(ABC):
+class NormalizableMixin(nn.Module):
     """
     Mixin class providing activation normalization functionality.
 
@@ -34,6 +34,7 @@ class NormalizableMixin(ABC):
             activation_normalizer: Optional normalizer for activations. If None,
                                  normalization is a no-op.
         """
+        super().__init__()
         self.activation_normalizer = activation_normalizer
         if self.activation_normalizer is not None:
             self.activation_normalizer.to(self.device)
@@ -400,7 +401,7 @@ class JumpReluAutoEncoder(Dictionary, nn.Module):
         return autoencoder.to(dtype=dtype, device=device)
 
 
-class BatchTopKSAE(Dictionary, nn.Module, NormalizableMixin):
+class BatchTopKSAE(NormalizableMixin, Dictionary):
     """
     Batch Top-K Sparse Autoencoder implementation.
 
@@ -943,7 +944,7 @@ class CodeNormalization(Enum):
         return self.name
 
 
-class CrossCoder(Dictionary, nn.Module, NormalizableMixin):
+class CrossCoder(Dictionary, NormalizableMixin):
     """
     A crosscoder sparse autoencoder for multi-layer activation processing.
 
