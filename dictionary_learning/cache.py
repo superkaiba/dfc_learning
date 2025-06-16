@@ -94,14 +94,15 @@ class RunningStatWelford:
             M2 = torch.load(
                 os.path.join(store_dir, "M2.pt"), weights_only=True, map_location=device
             )
-            return RunningStatWelford(
+            stat = RunningStatWelford(
                 shape=mean.shape,
-                dtype=dtype,
+                dtype=mean.dtype,
                 device=device,
-                count=count,
-                mean=mean,
-                M2=M2,
             )
+            stat.count = count
+            stat.mean = mean
+            stat.M2 = M2
+            return stat
         else:
             return RunningStatWelford(shape=shape, dtype=dtype, device=device)
 
@@ -305,6 +306,12 @@ class ActivationCache:
     @property
     def normalizer(self):
         return ActivationNormalizer(self.mean, self.std)
+
+    @property
+    def running_stats(self):
+        return RunningStatWelford.load_or_create_state(
+            self._cache_store_dir, shape=(self.config["d_model"],)
+        )
 
     def __len__(self):
         return self.config["total_size"]
