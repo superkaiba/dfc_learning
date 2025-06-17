@@ -36,8 +36,7 @@ class NormalizableMixin(nn.Module):
         """
         super().__init__()
         self.activation_normalizer = activation_normalizer
-        if self.activation_normalizer is not None:
-            self.activation_normalizer.to(self.device)
+
 
     def normalize_activations(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
         """
@@ -594,7 +593,16 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
         elif "k" in state_dict and k != state_dict["k"].item():
             raise ValueError(f"k={k} != {state_dict['k'].item()}=state_dict['k']")
 
-        autoencoder = cls(activation_dim, dict_size, k)
+        # Load activation normalizer if present in kwargs
+        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
+        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
+        if activation_normalizer_mean is not None and activation_normalizer_std is not None:
+            activation_normalizer = ActivationNormalizer(
+                mean=activation_normalizer_mean, std=activation_normalizer_std
+            )
+        else:  
+            activation_normalizer = None
+        autoencoder = cls(activation_dim, dict_size, k, activation_normalizer=activation_normalizer)
         autoencoder.load_state_dict(state_dict)
         if device is not None:
             autoencoder.to(device)
@@ -729,8 +737,6 @@ class CrossCoderEncoder(nn.Module):
         self.weight = nn.Parameter(weight)
         self.bias = nn.Parameter(th.zeros(dict_size))
         self.activation_normalizer = activation_normalizer
-        if self.activation_normalizer is not None:
-            self.activation_normalizer.to(self.device)
 
     def forward(
         self,
@@ -763,7 +769,7 @@ class CrossCoderEncoder(nn.Module):
                 - summed_features: shape (batch_size, dict_size)
                 - per_layer_features: shape (batch_size, num_layers, dict_size)
         """
-        if normalize_activations:
+        if normalize_activations and self.activation_normalizer is not None:
             x = self.activation_normalizer.normalize(x, inplace=inplace_normalize)
         x = x[:, self.encoder_layers]
         if select_features is not None:
@@ -836,8 +842,7 @@ class CrossCoderDecoder(nn.Module):
                 weight = weight / weight.norm(dim=2, keepdim=True) * norm_init_scale
             self.weight = nn.Parameter(weight)
         self.activation_normalizer = activation_normalizer
-        if self.activation_normalizer is not None:
-            self.activation_normalizer.to(self.device)
+
 
     def forward(
         self,
@@ -873,7 +878,7 @@ class CrossCoderDecoder(nn.Module):
             x = th.einsum("blf, lfd -> bld", f, w)
         if add_bias:
             x += self.bias
-        if denormalize_activations:
+        if denormalize_activations and self.activation_normalizer is not None:
             x = self.activation_normalizer.denormalize(x, inplace=True)
         return x
 
@@ -1260,6 +1265,15 @@ class CrossCoder(Dictionary, NormalizableMixin):
                     code_normalization.value, dtype=th.int
                 )
         num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
+        # Load activation normalizer if present in kwargs
+        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
+        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
+        if activation_normalizer_mean is not None and activation_normalizer_std is not None:
+            activation_normalizer = ActivationNormalizer(
+                mean=activation_normalizer_mean, std=activation_normalizer_std
+            )
+        else:
+            activation_normalizer = None
 
         crosscoder = cls(
             activation_dim,
@@ -1268,6 +1282,7 @@ class CrossCoder(Dictionary, NormalizableMixin):
             code_normalization=CodeNormalization._value2member_map_[
                 state_dict["code_normalization_id"].item()
             ],
+            activation_normalizer=activation_normalizer,
         )
         crosscoder.load_state_dict(state_dict)
 
@@ -1650,6 +1665,18 @@ class BatchTopKCrossCoder(CrossCoder):
                 state_dict["k"] == kwargs["k"]
             ), f"k in kwargs ({kwargs['k']}) does not match k in state_dict ({state_dict['k']})"
             kwargs.pop("k")
+
+        # Load activation normalizer if present in kwargs
+        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
+        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
+        if activation_normalizer_mean is not None and activation_normalizer_std is not None:
+            activation_normalizer = ActivationNormalizer(
+                mean=activation_normalizer_mean, std=activation_normalizer_std
+            )
+
+        else:
+            activation_normalizer = None
+
         kwargs.update()
 
         crosscoder = cls(
@@ -1658,6 +1685,7 @@ class BatchTopKCrossCoder(CrossCoder):
             num_layers,
             k=state_dict["k"],
             code_normalization=code_normalization,
+            activation_normalizer=activation_normalizer,
             **kwargs,
         )
         if "code_normalization_id" not in state_dict:

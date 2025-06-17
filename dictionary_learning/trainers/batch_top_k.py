@@ -213,7 +213,7 @@ class BatchTopKTrainer(SAETrainer):
         x = x.to(self.device)
         x = self.ae.normalize_activations(
             x,
-            inplace_normalize=True,  # Normalize inplace to avoid copying the activations during training
+            inplace=True,  # Normalize inplace to avoid copying the activations during training
         )
         loss = self.loss(x, step=step, normalize_activations=False)
         loss.backward()

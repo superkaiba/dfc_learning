@@ -349,7 +349,7 @@ class ActivationCache:
                 print(
                     f"Waiting for {ActivationCache.__active_processes.value} save processes to finish"
                 )
-                time.sleep(1)
+                time.sleep(10)
             ActivationCache.__pool.close()
             ActivationCache.__pool = None
             ActivationCache.__manager.shutdown()
