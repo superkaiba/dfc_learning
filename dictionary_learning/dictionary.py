@@ -14,7 +14,7 @@ from warnings import warn
 from typing import Callable
 from enum import Enum, auto
 from abc import ABC, abstractmethod
-from .utils import set_decoder_norm_to_unit_norm, ActivationNormalizer
+from .utils import set_decoder_norm_to_unit_norm
 
 
 class NormalizableMixin(nn.Module):
@@ -22,24 +22,44 @@ class NormalizableMixin(nn.Module):
     Mixin class providing activation normalization functionality.
 
     This mixin allows classes to optionally normalize and denormalize activations
-    using an ActivationNormalizer. If no normalizer is provided, activations
+    using mean and std tensors. If no mean/std is provided, activations
     pass through unchanged.
     """
 
-    def __init__(self, activation_normalizer: ActivationNormalizer | None = None):
+    def __init__(self, activation_mean: th.Tensor | None = None, activation_std: th.Tensor | None = None, activation_shape: tuple[int, ...] | None = None):
         """
         Initialize the normalization mixin.
 
         Args:
-            activation_normalizer: Optional normalizer for activations. If None,
-                                 normalization is a no-op.
+            activation_mean: Optional mean tensor for normalization. If None,
+                           normalization is a no-op.
+            activation_std: Optional std tensor for normalization. If None,
+                          normalization is a no-op.
+            activation_shape: Shape of the activation tensor. Required if activation_mean and activation_std are None for proper initialization and registration of the buffers.
         """
         super().__init__()
-        self.activation_normalizer = activation_normalizer
+        if activation_mean is not None and activation_std is not None:
+            # Type assertion to help linter understand these are tensors
+            assert isinstance(activation_mean, th.Tensor), "Expected mean to be a tensor"
+            assert isinstance(activation_std, th.Tensor), "Expected std to be a tensor"
+            assert not th.isnan(activation_mean).any(), "Expected mean to be non-NaN"
+            assert not th.isnan(activation_std).any(), "Expected std to be non-NaN"
+            self.register_buffer("activation_mean", activation_mean)
+            self.register_buffer("activation_std", activation_std)
+        else:
+            assert activation_shape is not None, "activation_shape must be provided if activation_mean and activation_std are None"
+            self.register_buffer("activation_mean", th.nan * th.ones(activation_shape))
+            self.register_buffer("activation_std", th.nan * th.ones(activation_shape))
+
+    @property
+    def has_activation_normalizer(self) -> bool:
+        """Check if activation normalization is enabled."""
+        return (not th.isnan(self.activation_mean).any() and
+                not th.isnan(self.activation_std).any())
 
     def normalize_activations(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
         """
-        Normalize input activations using the configured normalizer.
+        Normalize input activations using the configured mean and std.
 
         Args:
             x: Input tensor to normalize
@@ -48,13 +68,18 @@ class NormalizableMixin(nn.Module):
         Returns:
             Normalized tensor (same as input if no normalizer configured)
         """
-        if self.activation_normalizer is not None:
-            return self.activation_normalizer.normalize(x, inplace=inplace)
+        if self.has_activation_normalizer:
+            if not inplace:
+                x = x.clone()
+            # Type assertions for linter
+            assert isinstance(self.activation_mean, th.Tensor)
+            assert isinstance(self.activation_std, th.Tensor)
+            return (x - self.activation_mean) / (self.activation_std + 1e-8)
         return x
 
     def denormalize_activations(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
         """
-        Denormalize input activations using the configured normalizer.
+        Denormalize input activations using the configured mean and std.
 
         Args:
             x: Input tensor to denormalize
@@ -63,8 +88,13 @@ class NormalizableMixin(nn.Module):
         Returns:
             Denormalized tensor (same as input if no normalizer configured)
         """
-        if self.activation_normalizer is not None:
-            return self.activation_normalizer.denormalize(x, inplace=inplace)
+        if self.has_activation_normalizer:
+            if not inplace:
+                x = x.clone()
+            # Type assertions for linter
+            assert isinstance(self.activation_mean, th.Tensor)
+            assert isinstance(self.activation_std, th.Tensor)
+            return x * (self.activation_std + 1e-8) + self.activation_mean
         return x
 
 
@@ -422,7 +452,8 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
         activation_dim: int,
         dict_size: int,
         k: int,
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: th.Tensor | None = None,
+        activation_std: th.Tensor | None = None,
     ):
         """
         Initialize the Batch Top-K SAE.
@@ -431,9 +462,15 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
             activation_dim: Dimension of the input activation vectors
             dict_size: Number of features in the dictionary
             k: Number of top features to keep active across the batch
-            activation_normalizer: Optional normalizer for input activations
+            activation_mean: Optional mean tensor for input activation normalization. If None, no normalization is applied.
+            activation_std: Optional std tensor for input activation normalization. If None, no normalization is applied.
         """
-        super().__init__(activation_normalizer=activation_normalizer)
+        # First initialize the base classes that don't take normalization parameters
+        super().__init__()
+        
+        # Then explicitly initialize the NormalizableMixin
+        NormalizableMixin.__init__(self, activation_mean=activation_mean, activation_std=activation_std, activation_shape=(activation_dim,))
+        
         self.activation_dim = activation_dim
         self.dict_size = dict_size
 
@@ -592,26 +629,23 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
         elif "k" in state_dict and k != state_dict["k"].item():
             raise ValueError(f"k={k} != {state_dict['k'].item()}=state_dict['k']")
 
-        # Load activation normalizer if present in kwargs
-        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
-        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
-        if (
-            activation_normalizer_mean is not None
-            and activation_normalizer_std is not None
-        ):
-            activation_normalizer = ActivationNormalizer(
-                mean=activation_normalizer_mean, std=activation_normalizer_std
-            )
-        else:
-            activation_normalizer = None
+
+        
         autoencoder = cls(
-            activation_dim, dict_size, k, activation_normalizer=activation_normalizer
+            activation_dim, dict_size, k, 
         )
         autoencoder.load_state_dict(state_dict)
         if device is not None:
             autoencoder.to(device)
         return autoencoder
 
+    @property
+    def dtype(self):
+        return self.encoder.weight.dtype
+
+    @property
+    def device(self):
+        return self.encoder.weight.device
 
 # TODO merge this with AutoEncoder
 class AutoEncoderNew(Dictionary, nn.Module):
@@ -687,7 +721,6 @@ class CrossCoderEncoder(nn.Module):
         encoder_layers: List of layer indices to encode from
         weight: Learnable weight tensor of shape (num_layers, activation_dim, dict_size)
         bias: Learnable bias tensor of shape (dict_size,)
-        activation_normalizer: Optional normalizer for input activations
     """
 
     def __init__(
@@ -698,7 +731,6 @@ class CrossCoderEncoder(nn.Module):
         same_init_for_all_layers: bool = False,
         norm_init_scale: float | None = None,
         encoder_layers: list[int] | None = None,
-        activation_normalizer: ActivationNormalizer | None = None,
     ):
         """
         Initialize the CrossCoder encoder.
@@ -710,7 +742,6 @@ class CrossCoderEncoder(nn.Module):
             same_init_for_all_layers: If True, initialize all layers with the same weights
             norm_init_scale: Scale factor for weight normalization after initialization
             encoder_layers: Specific layer indices to encode from (defaults to all layers)
-            activation_normalizer: Optional normalizer for input activations
 
         Raises:
             ValueError: If neither encoder_layers nor num_layers is specified
@@ -740,15 +771,12 @@ class CrossCoderEncoder(nn.Module):
             weight = weight / weight.norm(dim=1, keepdim=True) * norm_init_scale
         self.weight = nn.Parameter(weight)
         self.bias = nn.Parameter(th.zeros(dict_size))
-        self.activation_normalizer = activation_normalizer
 
     def forward(
         self,
         x: th.Tensor,
         return_no_sum: bool = False,
         select_features: list[int] | None = None,
-        normalize_activations: bool = True,
-        inplace_normalize: bool = False,
         **kwargs,
     ) -> th.Tensor:  # (batch_size, activation_dim)
         """
@@ -761,8 +789,6 @@ class CrossCoderEncoder(nn.Module):
             x: Input activations of shape (batch_size, n_layers, activation_dim)
             return_no_sum: If True, return both summed and per-layer features
             select_features: Optional list of feature indices to compute (for efficiency)
-            normalize_activations: Whether to normalize input activations
-            inplace_normalize: Whether to normalize activations in-place
             **kwargs: Additional keyword arguments (ignored)
 
         Returns:
@@ -773,8 +799,6 @@ class CrossCoderEncoder(nn.Module):
                 - summed_features: shape (batch_size, dict_size)
                 - per_layer_features: shape (batch_size, num_layers, dict_size)
         """
-        if normalize_activations and self.activation_normalizer is not None:
-            x = self.activation_normalizer.normalize(x, inplace=inplace_normalize)
         x = x[:, self.encoder_layers]
         if select_features is not None:
             w = self.weight[:, :, select_features]
@@ -802,7 +826,6 @@ class CrossCoderDecoder(nn.Module):
         num_layers: Number of layers being decoded to
         weight: Learnable weight tensor of shape (num_layers, dict_size, activation_dim)
         bias: Learnable bias tensor of shape (num_layers, activation_dim)
-        activation_normalizer: Optional normalizer for output activations
     """
 
     def __init__(
@@ -813,7 +836,6 @@ class CrossCoderDecoder(nn.Module):
         same_init_for_all_layers: bool = False,
         norm_init_scale: float | None = None,
         init_with_weight: th.Tensor | None = None,
-        activation_normalizer: ActivationNormalizer | None = None,
     ):
         """
         Initialize the CrossCoder decoder.
@@ -825,7 +847,6 @@ class CrossCoderDecoder(nn.Module):
             same_init_for_all_layers: If True, initialize all layers with the same weights
             norm_init_scale: Scale factor for weight normalization after initialization
             init_with_weight: Pre-initialized weight tensor to use instead of random init
-            activation_normalizer: Optional normalizer for output activations
         """
         super().__init__()
         self.activation_dim = activation_dim
@@ -845,14 +866,12 @@ class CrossCoderDecoder(nn.Module):
             if norm_init_scale is not None:
                 weight = weight / weight.norm(dim=2, keepdim=True) * norm_init_scale
             self.weight = nn.Parameter(weight)
-        self.activation_normalizer = activation_normalizer
 
     def forward(
         self,
         f: th.Tensor,
         select_features: list[int] | None = None,
         add_bias: bool = True,
-        denormalize_activations: bool = True,
     ) -> th.Tensor:  # (batch_size, n_layers, activation_dim)
         # f: (batch_size, n_layers, dict_size)
         """
@@ -866,7 +885,6 @@ class CrossCoderDecoder(nn.Module):
                (batch_size, n_layers, dict_size)
             select_features: Optional list of feature indices to use (for efficiency)
             add_bias: Whether to add the decoder bias terms
-            denormalize_activations: Whether to denormalize the output activations
 
         Returns:
             x: Reconstructed activations of shape (batch_size, n_layers, activation_dim)
@@ -881,8 +899,6 @@ class CrossCoderDecoder(nn.Module):
             x = th.einsum("blf, lfd -> bld", f, w)
         if add_bias:
             x += self.bias
-        if denormalize_activations and self.activation_normalizer is not None:
-            x = self.activation_normalizer.denormalize(x, inplace=True)
         return x
 
 
@@ -978,7 +994,8 @@ class CrossCoder(Dictionary, NormalizableMixin):
         code_normalization: Method for normalizing feature activations
         code_normalization_alpha_sae: Weight for SAE component in MIXED normalization
         code_normalization_alpha_cc: Weight for CrossCoder component in MIXED normalization
-        activation_normalizer: Optional normalizer for input/output activations
+        activation_mean: Optional mean tensor for input/output activation normalization
+        activation_std: Optional std tensor for input/output activation normalization
     """
 
     def __init__(
@@ -995,7 +1012,8 @@ class CrossCoder(Dictionary, NormalizableMixin):
         code_normalization: CodeNormalization | str = CodeNormalization.CROSSCODER,
         code_normalization_alpha_sae: float | None = 1.0,
         code_normalization_alpha_cc: float | None = 0.1,
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: th.Tensor | None = None,
+        activation_std: th.Tensor | None = None,
     ):
         """
         Initialize a CrossCoder sparse autoencoder.
@@ -1013,9 +1031,15 @@ class CrossCoder(Dictionary, NormalizableMixin):
             code_normalization: Method for normalizing feature activations
             code_normalization_alpha_sae: Weight for SAE component in MIXED normalization
             code_normalization_alpha_cc: Weight for CrossCoder component in MIXED normalization
-            activation_normalizer: Optional normalizer for input/output activations
+            activation_mean: Optional mean tensor for input/output activation normalization
+            activation_std: Optional std tensor for input/output activation normalization
         """
-        super().__init__(activation_normalizer=activation_normalizer)
+        # First initialize the base classes that don't take normalization parameters
+        super().__init__(activation_mean=activation_mean, activation_std=activation_std, activation_shape=(num_layers, activation_dim))
+        
+        # Then explicitly initialize the NormalizableMixin
+        # NormalizableMixin.__init__(
+        
         if num_decoder_layers is None:
             num_decoder_layers = num_layers
 
@@ -1037,7 +1061,6 @@ class CrossCoder(Dictionary, NormalizableMixin):
             same_init_for_all_layers=same_init_for_all_layers,
             norm_init_scale=norm_init_scale,
             encoder_layers=encoder_layers,
-            activation_normalizer=activation_normalizer,
         )
 
         if init_with_transpose:
@@ -1054,7 +1077,6 @@ class CrossCoder(Dictionary, NormalizableMixin):
             same_init_for_all_layers=same_init_for_all_layers,
             init_with_weight=decoder_weight,
             norm_init_scale=norm_init_scale,
-            activation_normalizer=activation_normalizer,
         )
         self.register_buffer(
             "code_normalization_id", th.tensor(code_normalization.value)
@@ -1123,12 +1145,9 @@ class CrossCoder(Dictionary, NormalizableMixin):
         Returns:
             Encoded features of shape (batch_size, dict_size)
         """
-        return self.encoder(
-            x,
-            normalize_activations=normalize_activations,
-            inplace_normalize=inplace_normalize,
-            **kwargs,
-        )
+        if normalize_activations:
+            x = self.normalize_activations(x, inplace=inplace_normalize)
+        return self.encoder(x, **kwargs)
 
     def get_activations(
         self,
@@ -1180,9 +1199,10 @@ class CrossCoder(Dictionary, NormalizableMixin):
             Reconstructed activations of shape (batch_size, n_layers, activation_dim)
         """
         # f: (batch_size, n_layers, dict_size)
-        return self.decoder(
-            f, denormalize_activations=denormalize_activations, **kwargs
-        )
+        x = self.decoder(f, **kwargs)
+        if denormalize_activations:
+            x = self.denormalize_activations(x, inplace=True)
+        return x
 
     def forward(
         self, x: th.Tensor, output_features=False, normalize_activations: bool = True
@@ -1268,18 +1288,6 @@ class CrossCoder(Dictionary, NormalizableMixin):
                     code_normalization.value, dtype=th.int
                 )
         num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
-        # Load activation normalizer if present in kwargs
-        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
-        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
-        if (
-            activation_normalizer_mean is not None
-            and activation_normalizer_std is not None
-        ):
-            activation_normalizer = ActivationNormalizer(
-                mean=activation_normalizer_mean, std=activation_normalizer_std
-            )
-        else:
-            activation_normalizer = None
 
         crosscoder = cls(
             activation_dim,
@@ -1288,7 +1296,6 @@ class CrossCoder(Dictionary, NormalizableMixin):
             code_normalization=CodeNormalization._value2member_map_[
                 state_dict["code_normalization_id"].item()
             ],
-            activation_normalizer=activation_normalizer,
         )
         crosscoder.load_state_dict(state_dict)
 
@@ -1296,6 +1303,14 @@ class CrossCoder(Dictionary, NormalizableMixin):
             crosscoder = crosscoder.to(device)
         return crosscoder.to(dtype=dtype)
 
+    @property
+    def dtype(self):
+        return self.encoder.weight.dtype
+
+    @property
+    def device(self):
+        return self.encoder.weight.device
+    
     def resample_neurons(self, deads, activations):
         """
         Resample dead neurons by reinitializing their weights.
@@ -1361,7 +1376,8 @@ class BatchTopKCrossCoder(CrossCoder):
         num_layers: Number of layers to process
         k: Number of top features to keep active (can be int or tensor for annealing)
         norm_init_scale: Scale factor for weight initialization normalization
-        activation_normalizer: Optional normalizer for input/output activations
+        activation_mean: Optional mean tensor for input/output activation normalization
+        activation_std: Optional std tensor for input/output activation normalization
         *args: Additional positional arguments passed to parent CrossCoder
         **kwargs: Additional keyword arguments passed to parent CrossCoder
     """
@@ -1373,7 +1389,8 @@ class BatchTopKCrossCoder(CrossCoder):
         num_layers: int,
         k: int | th.Tensor = 100,
         norm_init_scale: float = 1.0,
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: th.Tensor | None = None,
+        activation_std: th.Tensor | None = None,
         *args,
         **kwargs,
     ):
@@ -1386,7 +1403,8 @@ class BatchTopKCrossCoder(CrossCoder):
             num_layers: Number of layers in the crosscoder
             k: Number of top features to keep active. Can be int or tensor for k-annealing
             norm_init_scale: Scale factor for weight initialization normalization
-            activation_normalizer: Optional normalizer for input/output activations
+            activation_mean: Optional mean tensor for input/output activation normalization
+            activation_std: Optional std tensor for input/output activation normalization
             *args: Additional positional arguments passed to parent class
             **kwargs: Additional keyword arguments passed to parent class
         """
@@ -1395,7 +1413,8 @@ class BatchTopKCrossCoder(CrossCoder):
             dict_size,
             num_layers,
             norm_init_scale=norm_init_scale,
-            activation_normalizer=activation_normalizer,
+            activation_mean=activation_mean,
+            activation_std=activation_std,
             *args,
             **kwargs,
         )
@@ -1672,35 +1691,16 @@ class BatchTopKCrossCoder(CrossCoder):
             ), f"k in kwargs ({kwargs['k']}) does not match k in state_dict ({state_dict['k']})"
             kwargs.pop("k")
 
-        # Load activation normalizer if present in kwargs
-        activation_normalizer_mean = state_dict.get("activation_normalizer.mean", None)
-        activation_normalizer_std = state_dict.get("activation_normalizer.std", None)
-        if (
-            activation_normalizer_mean is not None
-            and activation_normalizer_std is not None
-        ):
-            activation_normalizer = ActivationNormalizer(
-                mean=activation_normalizer_mean, std=activation_normalizer_std
-            )
-
-        else:
-            activation_normalizer = None
-
-        kwargs.update()
-
+        
         crosscoder = cls(
             activation_dim,
             dict_size,
             num_layers,
             k=state_dict["k"],
             code_normalization=code_normalization,
-            activation_normalizer=activation_normalizer,
             **kwargs,
         )
-        if "code_normalization_id" not in state_dict:
-            state_dict["code_normalization_id"] = th.tensor(
-                code_normalization.value, dtype=th.int
-            )
+
         crosscoder.load_state_dict(state_dict)
         if device is not None:
             crosscoder = crosscoder.to(device)

@@ -8,7 +8,6 @@ from ..dictionary import CrossCoder, BatchTopKCrossCoder
 from collections import namedtuple
 from typing import Optional
 from ..trainers.trainer import get_lr_schedule
-from ..utils import ActivationNormalizer
 
 
 class CrossCoderTrainer(SAETrainer):
@@ -37,7 +36,8 @@ class CrossCoderTrainer(SAETrainer):
         dict_class_kwargs: Additional arguments for the dictionary class (default: {})
         pretrained_ae: Pre-trained autoencoder to use instead of initializing new one (default: None)
         use_mse_loss: Whether to use MSE loss instead of L2 loss for reconstruction (default: False)
-        activation_normalizer: Optional activation normalizer (default: None)
+        activation_mean: Optional activation mean (default: None)
+        activation_std: Optional activation std (default: None)
     """
 
     def __init__(
@@ -60,7 +60,8 @@ class CrossCoderTrainer(SAETrainer):
         dict_class_kwargs={},
         pretrained_ae=None,
         use_mse_loss=False,
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: Optional[th.Tensor] = None,
+        activation_std: Optional[th.Tensor] = None,
     ):
         super().__init__(seed)
 
@@ -80,7 +81,8 @@ class CrossCoderTrainer(SAETrainer):
                 activation_dim,
                 dict_size,
                 num_layers=num_layers,
-                activation_normalizer=activation_normalizer,
+                activation_mean=activation_mean,
+                activation_std=activation_std,
                 **dict_class_kwargs,
             )
         else:
@@ -298,7 +300,8 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         submodule_name: Specific submodule name within the layer (default: None)
         pretrained_ae: Pre-trained autoencoder (default: None)
         dict_class_kwargs: Additional arguments for the dictionary class (default: {})
-        activation_normalizer: Optional activation normalizer (default: None)
+        activation_mean: Optional activation mean (default: None)
+        activation_std: Optional activation std (default: None)
     """
 
     def __init__(
@@ -325,7 +328,8 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         submodule_name: Optional[str] = None,
         pretrained_ae: Optional[BatchTopKCrossCoder] = None,
         dict_class_kwargs: dict = {},
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: Optional[th.Tensor] = None,
+        activation_std: Optional[th.Tensor] = None,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -356,7 +360,8 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
                 dict_size,
                 num_layers,
                 self.k_initial,
-                activation_normalizer=activation_normalizer,
+                activation_mean=activation_mean,
+                activation_std=activation_std,
                 **dict_class_kwargs,
             )
         else:

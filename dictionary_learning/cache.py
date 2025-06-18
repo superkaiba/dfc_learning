@@ -15,7 +15,6 @@ from .utils import (
     dtype_to_str,
     str_to_dtype,
     torch_to_numpy_dtype,
-    ActivationNormalizer,
 )
 
 if DEBUG:
@@ -303,9 +302,6 @@ class ActivationCache:
                 )
         return self._std
 
-    @property
-    def normalizer(self):
-        return ActivationNormalizer(self.mean, self.std)
 
     @property
     def running_stats(self):
@@ -701,9 +697,6 @@ class PairedActivationCache:
             (self.activation_cache_1.std, self.activation_cache_2.std), dim=0
         )
 
-    @property
-    def normalizer(self):
-        return ActivationNormalizer(self.mean, self.std)
 
 
 class ActivationCacheTuple:
@@ -732,7 +725,3 @@ class ActivationCacheTuple:
     @property
     def std(self):
         return th.stack([cache.std for cache in self.activation_caches], dim=0)
-
-    @property
-    def normalizer(self):
-        return ActivationNormalizer(self.mean, self.std)

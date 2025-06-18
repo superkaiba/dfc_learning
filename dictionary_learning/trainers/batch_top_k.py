@@ -9,7 +9,6 @@ from ..trainers.trainer import (
     set_decoder_norm_to_unit_norm,
     remove_gradient_parallel_to_decoder_directions,
 )
-from ..dictionary import ActivationNormalizer
 
 
 class BatchTopKTrainer(SAETrainer):
@@ -32,7 +31,8 @@ class BatchTopKTrainer(SAETrainer):
         device: Optional[str] = None,
         wandb_name: str = "BatchTopKSAE",
         submodule_name: Optional[str] = None,
-        activation_normalizer: ActivationNormalizer | None = None,
+        activation_mean: Optional[t.Tensor] = None,
+        activation_std: Optional[t.Tensor] = None,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -52,7 +52,7 @@ class BatchTopKTrainer(SAETrainer):
             t.cuda.manual_seed_all(seed)
 
         self.ae = dict_class(
-            activation_dim, dict_size, k, activation_normalizer=activation_normalizer
+            activation_dim, dict_size, k, activation_mean=activation_mean, activation_std=activation_std
         )
 
         if device is None:

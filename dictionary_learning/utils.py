@@ -123,20 +123,3 @@ def remove_gradient_parallel_to_decoder_directions(
         "d_sae, d_in d_sae -> d_in d_sae",
     )
     return W_dec_DF_grad
-
-
-class ActivationNormalizer(th.nn.Module):
-    def __init__(self, mean: th.Tensor, std: th.Tensor):
-        super().__init__()
-        self.register_buffer("mean", mean)
-        self.register_buffer("std", std)
-
-    def normalize(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
-        if not inplace:
-            x = x.clone()
-        return (x - self.mean) / (self.std + 1e-8)
-
-    def denormalize(self, x: th.Tensor, inplace: bool = False) -> th.Tensor:
-        if not inplace:
-            x = x.clone()
-        return x * (self.std + 1e-8) + self.mean
