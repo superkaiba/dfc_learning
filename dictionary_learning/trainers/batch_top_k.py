@@ -30,7 +30,6 @@ class BatchTopKTrainer(SAETrainer):
         seed: Optional[int] = None,
         device: Optional[str] = None,
         wandb_name: str = "BatchTopKSAE",
-        submodule_name: Optional[str] = None,
         activation_mean: Optional[t.Tensor] = None,
         activation_std: Optional[t.Tensor] = None,
     ):
@@ -38,7 +37,6 @@ class BatchTopKTrainer(SAETrainer):
         assert layer is not None and lm_name is not None
         self.layer = layer
         self.lm_name = lm_name
-        self.submodule_name = submodule_name
         self.wandb_name = wandb_name
         self.steps = steps
         self.decay_start = decay_start
@@ -258,7 +256,6 @@ class BatchTopKTrainer(SAETrainer):
             "layer": self.layer,
             "lm_name": self.lm_name,
             "wandb_name": self.wandb_name,
-            "submodule_name": self.submodule_name,
         }
 
     @staticmethod
