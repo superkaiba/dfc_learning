@@ -173,7 +173,7 @@ class BatchTopKTrainer(SAETrainer):
         if step > self.threshold_start_step:
             self.update_threshold(f)
 
-        x_hat = self.ae.decode(f, denormalize_activations=normalize_activations)
+        x_hat = self.ae.decode(f, denormalize_activations=False)
 
         e = x - x_hat
 

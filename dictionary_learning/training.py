@@ -11,6 +11,7 @@ from warnings import warn
 import wandb
 from typing import List, Optional
 
+from .trainers.batch_top_k import BatchTopKTrainer
 from .trainers.crosscoder import CrossCoderTrainer, BatchTopKCrossCoderTrainer
 
 
@@ -300,7 +301,7 @@ def trainSAE(
                     use_threshold=False,
                     epoch_idx_per_step=epoch_idx_per_step,
                 )
-                if isinstance(trainer, BatchTopKCrossCoderTrainer):
+                if isinstance(trainer, BatchTopKCrossCoderTrainer) or isinstance(trainer, BatchTopKTrainer):
                     log_stats(
                         trainer,
                         step,

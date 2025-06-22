@@ -503,15 +503,13 @@ class ActivationCache:
         ), "Shuffling shards and storing tokens is not supported yet"
         
         # Check if we need to store sequence ranges
-        has_bos_token = model.tokenizer.bos_token_id is not None
+        has_bos_token = model.tokenizer.bos_token is not None
         store_sequence_ranges = (
             store_tokens and 
             not shuffle_shards and 
             not has_bos_token
         )
-        if store_sequence_ranges:
-            print("No BOS token found. Will store sequence ranges.")
-        
+  
         dataloader = DataLoader(data, batch_size=batch_size, num_workers=num_workers)
 
         activation_cache = [[] for _ in submodules]
