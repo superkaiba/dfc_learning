@@ -269,6 +269,7 @@ class ActivationCache:
                 os.path.join(store_dir, "tokens.pt"), weights_only=True
             ).cpu()
 
+        self._sequence_ranges = None
         self._mean = None
         self._std = None
 
@@ -321,6 +322,23 @@ class ActivationCache:
     @property
     def tokens(self):
         return self._tokens
+
+    @property
+    def sequence_ranges(self):
+        if hasattr(self, '_sequence_ranges') and self._sequence_ranges is not None:
+            return self._sequence_ranges
+        
+        if ("store_sequence_ranges" in self.config and 
+            self.config["store_sequence_ranges"] and
+            os.path.exists(os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt"))):
+            self._sequence_ranges = th.load(
+                os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt"), 
+                weights_only=True
+            ).cpu()
+            return self._sequence_ranges
+        else:
+            # Return None if sequence ranges not available
+            return None
 
     @staticmethod
     def get_activations(submodule: nn.Module, io: str):
@@ -434,17 +452,25 @@ class ActivationCache:
             cached data is present and num_tokens is the total number of tokens in the cache
         """
         num_tokens = 0
+        config = None
         for submodule_name in submodule_names:
-            if not os.path.exists(
-                os.path.join(store_dir, f"{submodule_name}_{io}", "config.json")
-            ):
+            config_path = os.path.join(store_dir, f"{submodule_name}_{io}", "config.json")
+            if not os.path.exists(config_path):
                 return False, 0
-            with open(
-                os.path.join(store_dir, f"{submodule_name}_{io}", "config.json"), "r"
-            ) as f:
-                num_tokens = json.load(f)["total_size"]
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                num_tokens = config["total_size"]
+        
         if store_tokens and not os.path.exists(os.path.join(store_dir, "tokens.pt")):
             return False, 0
+            
+        # Check for sequence ranges if they should exist
+        if (config and 
+            "store_sequence_ranges" in config and 
+            config["store_sequence_ranges"] and
+            not os.path.exists(os.path.join(store_dir, "sequence_ranges.pt"))):
+            return False, 0
+            
         return True, num_tokens
 
     @th.no_grad()
@@ -475,10 +501,24 @@ class ActivationCache:
         assert (
             not shuffle_shards or not store_tokens
         ), "Shuffling shards and storing tokens is not supported yet"
+        
+        # Check if we need to store sequence ranges
+        has_bos_token = model.tokenizer.bos_token_id is not None
+        store_sequence_ranges = (
+            store_tokens and 
+            not shuffle_shards and 
+            not has_bos_token
+        )
+        if store_sequence_ranges:
+            print("No BOS token found. Will store sequence ranges.")
+        
         dataloader = DataLoader(data, batch_size=batch_size, num_workers=num_workers)
 
         activation_cache = [[] for _ in submodules]
         tokens_cache = []
+        sequence_ranges_cache = []
+        current_token_position = 0  # Track position in flattened token stream
+        
         store_sub_dirs = [
             os.path.join(store_dir, f"{submodule_names[i]}_{io}")
             for i in range(len(submodules))
@@ -530,6 +570,14 @@ class ActivationCache:
             store_mask = attention_mask.clone()
             if ignore_first_n_tokens_per_sample > 0:
                 store_mask[:, :ignore_first_n_tokens_per_sample] = 0
+            
+            # Track sequence ranges if needed
+            if store_sequence_ranges:
+                batch_lengths = store_mask.sum(dim=1).tolist()
+                batch_sequence_ranges = np.cumsum([0] + batch_lengths[:-1]) + current_token_position
+                sequence_ranges_cache.extend(batch_sequence_ranges.tolist())
+                current_token_position += sum(batch_lengths)
+
             if store_tokens:
                 tokens_cache.append(
                     tokens["input_ids"].reshape(-1)[store_mask.reshape(-1).bool()]
@@ -572,7 +620,8 @@ class ActivationCache:
                     if dtype is not None:
                         activation_cache[i][-1] = activation_cache[i][-1].to(dtype)
 
-                assert len(tokens_cache[-1]) == activation_cache[0][-1].shape[0]
+                if store_tokens:
+                    assert len(tokens_cache[-1]) == activation_cache[0][-1].shape[0]
                 assert activation_cache[0][-1].shape[0] == store_mask.sum().item()
                 current_size += activation_cache[0][-1].shape[0]
             else:
@@ -639,6 +688,7 @@ class ActivationCache:
                         "total_size": total_size,
                         "shard_count": shard_count,
                         "store_tokens": store_tokens,
+                        "store_sequence_ranges": store_sequence_ranges,
                     },
                     f,
                 )
@@ -651,6 +701,16 @@ class ActivationCache:
                 tokens_cache.shape[0] == total_size
             ), f"{tokens_cache.shape[0]} != {total_size}"
             th.save(tokens_cache, os.path.join(store_dir, "tokens.pt"))
+
+        # store sequence ranges
+        if store_sequence_ranges:
+            print("Storing sequence ranges...")
+            # add the last sequence range to the end of the cache
+            sequence_ranges_cache.append(current_token_position)
+            assert sequence_ranges_cache[-1] == total_size
+            sequence_ranges_tensor = th.tensor(sequence_ranges_cache, dtype=th.long)
+            th.save(sequence_ranges_tensor, os.path.join(store_dir, "sequence_ranges.pt"))
+            print(f"Stored {len(sequence_ranges_cache)} sequence ranges")
 
         # store running stats
         for i in range(len(submodules)):
@@ -686,6 +746,14 @@ class PairedActivationCache:
         )
 
     @property
+    def sequence_ranges(self):
+        seq_starts_1 = self.activation_cache_1.sequence_ranges
+        seq_starts_2 = self.activation_cache_2.sequence_ranges
+        if seq_starts_1 is not None and seq_starts_2 is not None:
+            return th.stack((seq_starts_1, seq_starts_2), dim=0)
+        return None
+
+    @property
     def mean(self):
         return th.stack(
             (self.activation_cache_1.mean, self.activation_cache_2.mean), dim=0
@@ -717,6 +785,13 @@ class ActivationCacheTuple:
     @property
     def tokens(self):
         return th.stack([cache.tokens for cache in self.activation_caches], dim=0)
+
+    @property
+    def sequence_ranges(self):
+        seq_starts_list = [cache.sequence_ranges for cache in self.activation_caches]
+        if all(seq_starts is not None for seq_starts in seq_starts_list):
+            return th.stack(seq_starts_list, dim=0)
+        return None
 
     @property
     def mean(self):

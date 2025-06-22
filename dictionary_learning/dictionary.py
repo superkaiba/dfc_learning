@@ -465,11 +465,9 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
             activation_mean: Optional mean tensor for input activation normalization. If None, no normalization is applied.
             activation_std: Optional std tensor for input activation normalization. If None, no normalization is applied.
         """
-        # First initialize the base classes that don't take normalization parameters
-        super().__init__()
+
+        super().__init__(activation_mean=activation_mean, activation_std=activation_std, activation_shape=(activation_dim,))
         
-        # Then explicitly initialize the NormalizableMixin
-        NormalizableMixin.__init__(self, activation_mean=activation_mean, activation_std=activation_std, activation_shape=(activation_dim,))
         
         self.activation_dim = activation_dim
         self.dict_size = dict_size
@@ -1036,9 +1034,7 @@ class CrossCoder(Dictionary, NormalizableMixin):
         """
         # First initialize the base classes that don't take normalization parameters
         super().__init__(activation_mean=activation_mean, activation_std=activation_std, activation_shape=(num_layers, activation_dim))
-        
-        # Then explicitly initialize the NormalizableMixin
-        # NormalizableMixin.__init__(
+
         
         if num_decoder_layers is None:
             num_decoder_layers = num_layers
@@ -1266,7 +1262,7 @@ class CrossCoder(Dictionary, NormalizableMixin):
         """
         if isinstance(code_normalization, str):
             code_normalization = CodeNormalization.from_string(code_normalization)
-        if from_hub:
+        if from_hub or path.endswith(".safetensors"):
             return super().from_pretrained(path, device=device, dtype=dtype, **kwargs)
 
         state_dict = th.load(path, map_location="cpu", weights_only=True)

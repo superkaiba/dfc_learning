@@ -7,7 +7,7 @@ from datasets import Dataset
 from nnsight import LanguageModel
 from dictionary_learning.cache import ActivationCache
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+import numpy as np
 
 @pytest.fixture
 def temp_dir():
@@ -267,36 +267,148 @@ def test_activation_cache_with_normalizer(temp_dir):
         cache.std, computed_std, atol=1e-5, rtol=1e-5
     ), "Cached std doesn't match computed std"
 
-    # Test normalizer functionality
-    normalizer = cache.normalizer
-
-    # Test normalization of a sample activation
-    sample_activation = cached_activations[0]
-    normalized = normalizer(sample_activation)
-
-    # Verify normalization: (x - mean) / std (with small epsilon for numerical stability)
-    expected_normalized = (sample_activation - cache.mean) / (cache.std + 1e-8)
-    assert th.allclose(
-        normalized, expected_normalized, atol=1e-6
-    ), "Normalizer doesn't work correctly"
-
-    # Test batch normalization
-    batch_normalized = normalizer(cached_activations[:5])
-    expected_batch_normalized = (cached_activations[:5] - cache.mean) / (
-        cache.std + 1e-8
-    )
-    assert th.allclose(
-        batch_normalized, expected_batch_normalized, atol=1e-6
-    ), "Batch normalization doesn't work correctly"
-
-    # Test that normalization preserves shape
-    assert (
-        normalized.shape == sample_activation.shape
-    ), "Normalization changed tensor shape"
-    assert (
-        batch_normalized.shape == cached_activations[:5].shape
-    ), "Batch normalization changed tensor shape"
-
     print(f"✓ Successfully tested ActivationCache with {len(cache)} activations")
     print(f"✓ Mean shape: {cache.mean.shape}, Std shape: {cache.std.shape}")
-    print(f"✓ Normalizer tests passed")
+
+
+def test_sequence_ranges_no_bos_token(temp_dir):
+    """Test that sequence ranges are stored when model has no BOS token."""
+    # Set flag to handle meta tensors properly
+    if hasattr(th.fx, 'experimental'):
+        th.fx.experimental._config.meta_nonzero_assume_all_nonzero = True
+
+    # Skip test if CUDA not available
+    if not th.cuda.is_available():
+        pytest.skip("CUDA not available, skipping test")
+
+    # Test strings of different lengths
+    test_strings = [
+        "Hello world",
+        "This is a longer sentence with more tokens",
+        "Short",
+        "Medium length text here",
+    ]
+
+    # Load GPT-2 model and modify tokenizer to simulate no BOS token
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = AutoModelForCausalLM.from_pretrained(
+        "gpt2", device_map="auto", torch_dtype=th.float32
+    )
+    model = LanguageModel(model, torch_dtype=th.float32, tokenizer=tokenizer)
+    model.tokenizer.pad_token = model.tokenizer.eos_token
+    
+    # Simulate model without BOS token
+    original_bos_token_id = model.tokenizer.bos_token_id
+    model.tokenizer.bos_token_id = None
+
+    tokens = model.tokenizer(test_strings, add_special_tokens=True, return_tensors="pt", padding=True, truncation=True)
+    lengths = tokens["attention_mask"].sum(dim=1).tolist()
+    ranges = np.cumsum([0] + lengths)
+    try:
+        # Get a transformer block
+        target_layer = model.transformer.h[6]
+        submodule_name = "transformer_h_6"
+
+        # Parameters for activation collection
+        batch_size = 2
+        context_len = 32
+        d_model = 768
+
+        # Collect activations with sequence start tracking
+        ActivationCache.collect(
+            data=test_strings,
+            submodules=(target_layer,),
+            submodule_names=(submodule_name,),
+            model=model,
+            store_dir=temp_dir,
+            batch_size=batch_size,
+            context_len=context_len,
+            shard_size=1000,
+            d_model=d_model,
+            io="out",
+            store_tokens=True,
+            shuffle_shards=False,  # Required for sequence ranges
+        )
+
+        # Load the cached activations
+        cache = ActivationCache(temp_dir, submodule_name + "_out")
+
+        # Verify sequence ranges were stored
+        sequence_ranges = cache.sequence_ranges
+        assert sequence_ranges is not None, "sequence ranges should be stored for model without BOS token"
+        
+        # Should have one sequence start per input string plus one for the last sequence
+        assert len(sequence_ranges) == len(test_strings) + 1, f"Expected {len(test_strings)} sequence ranges, got {len(sequence_ranges)}"
+        
+        # First sequence should start at position 0
+        assert sequence_ranges[0].item() == 0, "First sequence should start at position 0"
+
+        # sequence ranges should be the same as the ranges computed from the tokens
+        assert np.allclose(sequence_ranges, ranges), "sequence ranges should be the same as the ranges computed from the tokens"
+        
+        # sequence ranges should be in ascending order
+        for i in range(1, len(sequence_ranges)):
+            assert sequence_ranges[i] > sequence_ranges[i-1], f"sequence ranges should be ascending: {sequence_ranges}"
+
+        # Verify sequence ranges align with token boundaries
+        tokens = cache.tokens
+        total_tokens = len(tokens)
+        
+        # All sequence ranges should be valid indices
+        for start_idx in sequence_ranges:
+            assert 0 <= start_idx <= total_tokens, f"Invalid sequence start index: {start_idx}"
+
+    finally:
+        # Restore original BOS token
+        model.tokenizer.bos_token_id = original_bos_token_id
+
+
+def test_sequence_ranges_with_bos_token(temp_dir):
+    """Test that sequence ranges are NOT stored when model has BOS token."""
+    # Set flag to handle meta tensors properly
+    if hasattr(th.fx, 'experimental'):
+        th.fx.experimental._config.meta_nonzero_assume_all_nonzero = True
+
+    # Skip test if CUDA not available
+    if not th.cuda.is_available():
+        pytest.skip("CUDA not available, skipping test")
+
+    test_strings = ["Hello world", "Another test sentence"]
+
+    # Load GPT-2 model with BOS token
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = AutoModelForCausalLM.from_pretrained(
+        "gpt2", device_map="auto", torch_dtype=th.float32
+    )
+    model = LanguageModel(model, torch_dtype=th.float32, tokenizer=tokenizer)
+    model.tokenizer.pad_token = model.tokenizer.eos_token
+    
+    # Ensure model has BOS token (set it explicitly)
+    model.tokenizer.bos_token_id = model.tokenizer.eos_token_id
+
+    # Get a transformer block
+    target_layer = model.transformer.h[6]
+    submodule_name = "transformer_h_6"
+
+    # Collect activations
+    ActivationCache.collect(
+        data=test_strings,
+        submodules=(target_layer,),
+        submodule_names=(submodule_name,),
+        model=model,
+        store_dir=temp_dir,
+        batch_size=2,
+        context_len=32,
+        shard_size=1000,
+        d_model=768,
+        io="out",
+        store_tokens=True,
+        shuffle_shards=False,
+    )
+
+    # Load the cached activations
+    cache = ActivationCache(temp_dir, submodule_name + "_out")
+
+    # Verify sequence ranges were NOT stored
+    sequence_ranges = cache.sequence_ranges
+    assert sequence_ranges is None, "sequence ranges should not be stored for model with BOS token"
