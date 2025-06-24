@@ -38,6 +38,7 @@ class CrossCoderTrainer(SAETrainer):
         use_mse_loss: Whether to use MSE loss instead of L2 loss for reconstruction (default: False)
         activation_mean: Optional activation mean (default: None)
         activation_std: Optional activation std (default: None)
+        target_rms: Target RMS for input activation normalization.
     """
 
     def __init__(
@@ -62,6 +63,7 @@ class CrossCoderTrainer(SAETrainer):
         use_mse_loss=False,
         activation_mean: Optional[th.Tensor] = None,
         activation_std: Optional[th.Tensor] = None,
+        target_rms: float = 1.0,
     ):
         super().__init__(seed)
 
@@ -71,6 +73,7 @@ class CrossCoderTrainer(SAETrainer):
         self.submodule_name = submodule_name
         self.compile = compile
         self.use_mse_loss = use_mse_loss
+        self.target_rms = target_rms
         if seed is not None:
             th.manual_seed(seed)
             th.cuda.manual_seed_all(seed)
@@ -83,6 +86,7 @@ class CrossCoderTrainer(SAETrainer):
                 num_layers=num_layers,
                 activation_mean=activation_mean,
                 activation_std=activation_std,
+                target_rms=target_rms,
                 **dict_class_kwargs,
             )
         else:
@@ -267,6 +271,7 @@ class CrossCoderTrainer(SAETrainer):
             "code_normalization": str(self.ae.code_normalization),
             "code_normalization_alpha_sae": self.ae.code_normalization_alpha_sae,
             "code_normalization_alpha_cc": self.ae.code_normalization_alpha_cc,
+            "target_rms": self.target_rms,
         }
 
 
@@ -302,6 +307,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         dict_class_kwargs: Additional arguments for the dictionary class (default: {})
         activation_mean: Optional activation mean (default: None)
         activation_std: Optional activation std (default: None)
+        target_rms: Target RMS for input activation normalization.
     """
 
     def __init__(
@@ -330,6 +336,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
         dict_class_kwargs: dict = {},
         activation_mean: Optional[th.Tensor] = None,
         activation_std: Optional[th.Tensor] = None,
+        target_rms: float = 1.0,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -348,6 +355,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
 
         self.threshold_beta = threshold_beta
         self.threshold_start_step = threshold_start_step
+        self.target_rms = target_rms
 
         if seed is not None:
             th.manual_seed(seed)
@@ -362,6 +370,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
                 self.k_initial,
                 activation_mean=activation_mean,
                 activation_std=activation_std,
+                target_rms=target_rms,
                 **dict_class_kwargs,
             )
         else:
@@ -689,6 +698,7 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             "wandb_name": self.wandb_name,
             "submodule_name": self.submodule_name,
             "dict_class_kwargs": {k: str(v) for k, v in self.dict_class_kwargs.items()},
+            "target_rms": self.target_rms,
         }
 
     @staticmethod

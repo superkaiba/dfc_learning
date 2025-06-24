@@ -32,6 +32,8 @@ class BatchTopKTrainer(SAETrainer):
         wandb_name: str = "BatchTopKSAE",
         activation_mean: Optional[t.Tensor] = None,
         activation_std: Optional[t.Tensor] = None,
+        target_rms: float = 1.0,
+        encoder_init_norm: str = 1.0,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -50,7 +52,13 @@ class BatchTopKTrainer(SAETrainer):
             t.cuda.manual_seed_all(seed)
 
         self.ae = dict_class(
-            activation_dim, dict_size, k, activation_mean=activation_mean, activation_std=activation_std
+            activation_dim,
+            dict_size,
+            k,
+            activation_mean=activation_mean,
+            activation_std=activation_std,
+            target_rms=target_rms,
+            encoder_init_norm=encoder_init_norm,
         )
 
         if device is None:
@@ -78,6 +86,7 @@ class BatchTopKTrainer(SAETrainer):
         self.effective_l0 = -1
         self.dead_features = -1
         self.pre_norm_auxk_loss = -1
+        self.encoder_init_norm = encoder_init_norm
 
         self.optimizer = t.optim.Adam(
             self.ae.parameters(), lr=self.lr, betas=(0.9, 0.999)
@@ -199,6 +208,9 @@ class BatchTopKTrainer(SAETrainer):
                     "l2_loss": l2_loss.item(),
                     "auxk_loss": auxk_loss.item(),
                     "loss": loss.item(),
+                    "deads": ~did_fire,
+                    "threshold": self.ae.threshold.item(),
+                    "rms_norm": t.sqrt((x.pow(2).sum(-1)).mean()).item(),
                 },
             )
 
@@ -256,6 +268,7 @@ class BatchTopKTrainer(SAETrainer):
             "layer": self.layer,
             "lm_name": self.lm_name,
             "wandb_name": self.wandb_name,
+            "encoder_init_norm": self.encoder_init_norm,
         }
 
     @staticmethod
