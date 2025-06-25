@@ -1440,6 +1440,7 @@ class BatchTopKCrossCoder(CrossCoder):
         norm_init_scale: float = 1.0,
         activation_mean: th.Tensor | None = None,
         activation_std: th.Tensor | None = None,
+        target_rms: float | None = 1.0,
         *args,
         **kwargs,
     ):
