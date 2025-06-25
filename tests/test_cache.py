@@ -412,3 +412,152 @@ def test_sequence_ranges_with_bos_token(temp_dir):
     # Verify sequence ranges were NOT stored
     sequence_ranges = cache.sequence_ranges
     assert sequence_ranges is None, "sequence ranges should not be stored for model with BOS token"
+
+
+def test_activation_cache_slice_indexing_cross_shard(temp_dir):
+    """Test ActivationCache slice indexing that crosses shard boundaries."""
+    # Set flag to handle meta tensors properly
+    th.fx.experimental._config.meta_nonzero_assume_all_nonzero = True
+
+    # Skip test if CUDA not available to avoid device mapping issues
+    if not th.cuda.is_available():
+        pytest.skip("CUDA not available, skipping test to avoid device mapping issues")
+
+    # Create test strings with sufficient data to span multiple shards
+    test_strings = [
+        f"This is test sentence number {i} with some content to fill up the cache."
+        for i in range(20)  # Create more samples to ensure multiple shards
+    ]
+
+    # Use the list directly
+    dataset = test_strings
+
+    # Load GPT-2 model
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = AutoModelForCausalLM.from_pretrained(
+        "gpt2", device_map="auto", torch_dtype=th.float32
+    )
+    model = LanguageModel(model, torch_dtype=th.float32, tokenizer=tokenizer)
+    model.tokenizer.pad_token = model.tokenizer.eos_token
+
+    # Get a transformer block to extract activations from
+    target_layer = model.transformer.h[6]  # Middle layer of GPT-2
+    submodule_name = "transformer_h_6"
+
+    # Parameters for activation collection - use small shard size to ensure multiple shards
+    batch_size = 3
+    context_len = 32
+    d_model = 768  # GPT-2 hidden size
+    shard_size = 50  # Small shard size to force multiple shards
+
+    # Collect activations using ActivationCache
+    ActivationCache.collect(
+        data=dataset,
+        submodules=(target_layer,),
+        submodule_names=(submodule_name,),
+        model=model,
+        store_dir=temp_dir,
+        batch_size=batch_size,
+        context_len=context_len,
+        shard_size=shard_size,  # Small shard size for testing cross-shard slicing
+        d_model=d_model,
+        io="out",
+        max_total_tokens=5000,
+        store_tokens=True,
+        shuffle_shards=False,  # Important: don't shuffle so we can predict shard boundaries
+    )
+
+    # Load the cached activations
+    cache = ActivationCache(temp_dir, submodule_name + "_out")
+    
+    # Verify we have multiple shards
+    assert len(cache.shards) >= 2, f"Expected at least 2 shards, got {len(cache.shards)}"
+    
+    total_size = len(cache)
+    print(f"Cache has {len(cache.shards)} shards with total size {total_size}")
+    
+    # Print shard boundaries for debugging
+    shard_boundaries = cache._range_to_shard_idx
+    print(f"Shard boundaries: {shard_boundaries}")
+    
+    # Test 1: Slice that crosses exactly one shard boundary
+    if len(cache.shards) >= 2:
+        # Find a slice that starts in first shard and ends in second shard
+        first_shard_end = shard_boundaries[1]
+        start_idx = max(0, first_shard_end - 10)
+        end_idx = min(total_size, first_shard_end + 10)
+        
+        # Get slice result
+        slice_result = cache[start_idx:end_idx]
+        
+        # Get individual results for comparison
+        individual_results = th.stack([cache[i] for i in range(start_idx, end_idx)], dim=0)
+        
+        # Verify they match
+        assert th.allclose(slice_result, individual_results, atol=1e-5, rtol=1e-5), \
+            f"Slice result doesn't match individual indexing for indices {start_idx}:{end_idx}"
+        
+        # Verify correct shape
+        expected_length = end_idx - start_idx
+        assert slice_result.shape[0] == expected_length, \
+            f"Expected slice length {expected_length}, got {slice_result.shape[0]}"
+        
+        print(f"✓ Cross-shard slice test 1 passed: indices {start_idx}:{end_idx}")
+
+    # Test 2: Slice that spans multiple shards
+    if len(cache.shards) >= 3:
+        # Find a slice that starts in first shard and ends in third shard
+        second_shard_end = shard_boundaries[2]
+        start_idx = max(0, shard_boundaries[1] - 5)  # Start near end of first shard
+        end_idx = min(total_size, second_shard_end + 5)  # End in third shard
+        
+        slice_result = cache[start_idx:end_idx]
+        individual_results = th.stack([cache[i] for i in range(start_idx, end_idx)], dim=0)
+        
+        assert th.allclose(slice_result, individual_results, atol=1e-5, rtol=1e-5), \
+            f"Multi-shard slice result doesn't match individual indexing for indices {start_idx}:{end_idx}"
+        
+        expected_length = end_idx - start_idx
+        assert slice_result.shape[0] == expected_length, \
+            f"Expected multi-shard slice length {expected_length}, got {slice_result.shape[0]}"
+        
+        print(f"✓ Multi-shard slice test passed: indices {start_idx}:{end_idx}")
+
+    # Test 3: Slice with step parameter across shards
+    if total_size >= 50:
+        start_idx = 5
+        end_idx = min(total_size, 45)
+        step = 3
+        
+        slice_result = cache[start_idx:end_idx:step]
+        individual_results = th.stack([cache[i] for i in range(start_idx, end_idx, step)], dim=0)
+        
+        assert th.allclose(slice_result, individual_results, atol=1e-5, rtol=1e-5), \
+            f"Stepped slice result doesn't match individual indexing for indices {start_idx}:{end_idx}:{step}"
+        
+        expected_length = len(range(start_idx, end_idx, step))
+        assert slice_result.shape[0] == expected_length, \
+            f"Expected stepped slice length {expected_length}, got {slice_result.shape[0]}"
+        
+        print(f"✓ Stepped slice test passed: indices {start_idx}:{end_idx}:{step}")
+
+    # Test 4: Edge cases - slice at boundaries
+    if len(cache.shards) >= 2:
+        # Test slice starting exactly at shard boundary
+        boundary_idx = shard_boundaries[1]
+        if boundary_idx < total_size - 5:
+            slice_result = cache[boundary_idx:boundary_idx + 5]
+            individual_results = th.stack([cache[i] for i in range(boundary_idx, boundary_idx + 5)], dim=0)
+            
+            assert th.allclose(slice_result, individual_results, atol=1e-5, rtol=1e-5), \
+                f"Boundary slice result doesn't match individual indexing"
+            
+            print(f"✓ Boundary slice test passed: starting at shard boundary {boundary_idx}")
+
+    # Test 5: Empty slice
+    empty_slice = cache[10:10]
+    assert empty_slice.shape[0] == 0, f"Expected empty slice, got shape {empty_slice.shape}"
+    print("✓ Empty slice test passed")
+    
+
+    print(f"✓ All slice indexing tests passed for cache with {len(cache.shards)} shards")

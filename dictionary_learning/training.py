@@ -218,6 +218,7 @@ def trainSAE(
     dtype=th.float32,
     run_wandb_finish=True,
     epoch_idx_per_step: Optional[List[int]] = None,
+    return_last_eval_logs=False,
 ):
     """
     Train SAE using the given trainer
@@ -364,4 +365,7 @@ def trainSAE(
     if use_wandb and run_wandb_finish:
         wandb.finish()
 
-    return get_model(trainer)
+    if return_last_eval_logs:
+        return get_model(trainer), last_eval_logs
+    else:
+        return get_model(trainer)

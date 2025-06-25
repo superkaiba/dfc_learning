@@ -210,8 +210,14 @@ class ActivationShard:
     def __len__(self):
         return self.activations.shape[0]
 
-    def __getitem__(self, *indices):
-        return th.tensor(self.activations[(*indices,)]).view(self.dtype)
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            data = self.activations[index]
+        elif isinstance(index, tuple):
+            data = self.activations[index]
+        else:
+            data = self.activations[index]
+        return th.tensor(data).view(self.dtype)
 
 
 def save_shard(activations, store_dir, shard_count, name, io):
@@ -313,11 +319,29 @@ class ActivationCache:
     def __len__(self):
         return self.config["total_size"]
 
-    def __getitem__(self, index: int):
-        shard_idx = np.searchsorted(self._range_to_shard_idx, index, side="right") - 1
-        offset = index - self._range_to_shard_idx[shard_idx]
-        shard = self.shards[shard_idx]
-        return shard[offset]
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            # Handle slice objects
+            start, stop, step = index.indices(len(self))
+            start_shard_idx = np.searchsorted(self._range_to_shard_idx, start, side="right") - 1
+            stop_shard_idx = np.searchsorted(self._range_to_shard_idx, stop, side="right") - 1
+            if start_shard_idx == stop_shard_idx:
+                offset = start - self._range_to_shard_idx[start_shard_idx]
+                end_offset = stop - self._range_to_shard_idx[stop_shard_idx]
+                shard = self.shards[start_shard_idx]
+                return shard[offset:end_offset:step]
+            else:
+                # Lazily load if we are not in the same shard
+                # TODO: make this more efficient
+                return th.stack([self[i] for i in range(start, stop, step)], dim=0)
+        elif isinstance(index, int):
+            # Handle single integer index
+            shard_idx = np.searchsorted(self._range_to_shard_idx, index, side="right") - 1
+            offset = index - self._range_to_shard_idx[shard_idx]
+            shard = self.shards[shard_idx]
+            return shard[offset]
+        else:
+            raise TypeError(f"Index must be int or slice, got {type(index)}")
 
     @property
     def tokens(self):
@@ -732,10 +756,17 @@ class PairedActivationCache:
     def __len__(self):
         return len(self.activation_cache_1)
 
-    def __getitem__(self, index: int):
-        return th.stack(
-            (self.activation_cache_1[index], self.activation_cache_2[index]), dim=0
-        )
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return th.stack(
+                (self.activation_cache_1[index], self.activation_cache_2[index]), dim=1
+            )
+        elif isinstance(index, int):
+            return th.stack(
+                (self.activation_cache_1[index], self.activation_cache_2[index]), dim=0
+            )
+        else:
+            raise TypeError(f"Index must be int or slice, got {type(index)}")
 
     @property
     def tokens(self):
