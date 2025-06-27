@@ -318,7 +318,6 @@ class ActivationCache:
 
     def __len__(self):
         return self.config["total_size"]
-
     def __getitem__(self, index):
         if isinstance(index, slice):
             # Handle slice objects
@@ -340,8 +339,14 @@ class ActivationCache:
             offset = index - self._range_to_shard_idx[shard_idx]
             shard = self.shards[shard_idx]
             return shard[offset]
+        elif isinstance(index, th.Tensor):
+            # Handle torch.Tensor index (convert to int if scalar)
+            if index.numel() == 1:
+                return self[index.item()]
+            else:
+                raise TypeError(f"Tensor index must be scalar, got shape {index.shape}")
         else:
-            raise TypeError(f"Index must be int or slice, got {type(index)}")
+            raise TypeError(f"Index must be int, slice, or scalar tensor, got {type(index)}")
 
     @property
     def tokens(self):
@@ -762,6 +767,10 @@ class PairedActivationCache:
                 (self.activation_cache_1[index], self.activation_cache_2[index]), dim=1
             )
         elif isinstance(index, int):
+            return th.stack(
+                (self.activation_cache_1[index], self.activation_cache_2[index]), dim=0
+            )
+        elif isinstance(index, th.Tensor):
             return th.stack(
                 (self.activation_cache_1[index], self.activation_cache_2[index]), dim=0
             )
