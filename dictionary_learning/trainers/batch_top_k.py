@@ -21,6 +21,7 @@ class BatchTopKTrainer(SAETrainer):
         layer: int,
         lm_name: str,
         dict_class: type = BatchTopKSAE,
+        pretrained_ae: Optional[BatchTopKSAE] = None,
         lr: Optional[float] = None,
         auxk_alpha: float = 1 / 32,
         warmup_steps: int = 1000,
@@ -33,7 +34,7 @@ class BatchTopKTrainer(SAETrainer):
         activation_mean: Optional[t.Tensor] = None,
         activation_std: Optional[t.Tensor] = None,
         target_rms: float = 1.0,
-        encoder_init_norm: str = 1.0,
+        encoder_init_norm: float = 1.0,
     ):
         super().__init__(seed)
         assert layer is not None and lm_name is not None
@@ -51,15 +52,18 @@ class BatchTopKTrainer(SAETrainer):
             t.manual_seed(seed)
             t.cuda.manual_seed_all(seed)
 
-        self.ae = dict_class(
-            activation_dim,
-            dict_size,
-            k,
-            activation_mean=activation_mean,
-            activation_std=activation_std,
-            target_rms=target_rms,
-            encoder_init_norm=encoder_init_norm,
-        )
+        if pretrained_ae is None:
+            self.ae = dict_class(
+                activation_dim,
+                dict_size,
+                k,
+                activation_mean=activation_mean,
+                activation_std=activation_std,
+                target_rms=target_rms,
+                encoder_init_norm=encoder_init_norm,
+            )
+        else:
+            self.ae = pretrained_ae
 
         if device is None:
             self.device = "cuda" if t.cuda.is_available() else "cpu"

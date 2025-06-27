@@ -667,6 +667,29 @@ class BatchTopKSAE(NormalizableMixin, Dictionary):
 
         state_dict = th.load(path, weights_only=True)
         dict_size, activation_dim = state_dict["encoder.weight"].shape
+        normalization_keys = [
+            "target_rms",
+            "activation_mean",
+            "activation_std",
+            "activation_global_scale",
+        ]
+        is_in_dict = th.tensor([k in state_dict for k in normalization_keys])
+        if not is_in_dict.all():
+            if is_in_dict.any():
+                raise ValueError(
+                    f"Some normalization keys are present in the state dict but not all. Missing keys: {[n for n in normalization_keys if n not in state_dict]}"
+                )
+            else:
+                warn(
+                    "No normalization keys found in the state dict. Assuming no normalization is needed. This is normal for old dictionaries."
+                )
+                for key in normalization_keys:
+                    state_dict[key] = (
+                        th.full((activation_dim,), th.nan)
+                        if key in ["activation_mean", "activation_std"]
+                        else th.tensor(th.nan)
+                    )
+
         if k is None:
             k = state_dict["k"].item()
         elif "k" in state_dict and k != state_dict["k"].item():
