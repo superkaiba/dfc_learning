@@ -45,7 +45,7 @@ class NormalizableMixin(nn.Module):
                           normalization is a no-op.
             activation_shape: Shape of the activation tensor. Required if activation_mean and activation_std are None for proper initialization and registration of the buffers.
             keep_relative_variance: If True, performs global scaling so that the
-                                  sum of variances is 1 while their relative magnitudes stay unchanged. If false we normalize neuron-wise.
+                                  sum of variances is 1 while their relative magnitudes stay unchanged. If false we normalize neuron-wise. We normalize the last dimension.
             target_rms: Target RMS for input activation normalization.
         """
         super().__init__()
@@ -69,11 +69,12 @@ class NormalizableMixin(nn.Module):
             self.register_buffer("activation_std", th.nan * th.ones(activation_shape))
 
         if self.keep_relative_variance and self.has_activation_normalizer:
-            total_var = (self.activation_std**2).sum()
+            total_var = (self.activation_std**2).sum(dim=-1)
+            assert total_var.shape == self.activation_mean.shape[:-1]
             activation_global_scale = self.target_rms / th.sqrt(total_var + 1e-8)
             self.register_buffer("activation_global_scale", activation_global_scale)
         else:
-            self.register_buffer("activation_global_scale", th.tensor(1.0))
+            self.register_buffer("activation_global_scale", th.ones(activation_shape[:-1]))
 
     @property
     def has_activation_normalizer(self) -> bool:
@@ -103,7 +104,7 @@ class NormalizableMixin(nn.Module):
             x = x - self.activation_mean
 
             if self.keep_relative_variance:
-                return x * self.activation_global_scale
+                return (x.T * self.activation_global_scale).T
             else:
                 return x / (self.activation_std + 1e-8)
         return x
@@ -127,7 +128,7 @@ class NormalizableMixin(nn.Module):
             assert isinstance(self.activation_std, th.Tensor)
 
             if self.keep_relative_variance:
-                x = x / (self.activation_global_scale + 1e-8)
+                x = (x.T / (self.activation_global_scale + 1e-8)).T
             else:
                 x = x * (self.activation_std + 1e-8)
 

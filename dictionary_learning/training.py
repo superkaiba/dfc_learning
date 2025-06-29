@@ -89,6 +89,7 @@ def log_stats(
     stage: str = "train",
     use_threshold: bool = True,
     epoch_idx_per_step: Optional[List[int]] = None,
+    num_tokens: int = None,
 ):
     with th.no_grad():
         log = {}
@@ -111,6 +112,8 @@ def log_stats(
 
         if epoch_idx_per_step is not None:
             log["epoch"] = epoch_idx_per_step[step]
+        if num_tokens is not None:
+            log["num_tokens"] = num_tokens
         wandb.log(log, step=step)
 
 
@@ -285,11 +288,12 @@ def trainSAE(
         with open(os.path.join(save_dir, "config.json"), "w") as f:
             json.dump(config, f, indent=4)
 
+    num_tokens = 0
     for step, act in enumerate(tqdm(data, total=steps)):
         if steps is not None and step >= steps:
             break
         act = act.to(trainer.device).to(dtype)
-
+        num_tokens += act.shape[0]
         # logging
         if log_steps is not None and step % log_steps == 0 and step != 0:
             with th.no_grad():
@@ -301,6 +305,7 @@ def trainSAE(
                     transcoder,
                     use_threshold=False,
                     epoch_idx_per_step=epoch_idx_per_step,
+                    num_tokens=num_tokens,
                 )
                 if isinstance(trainer, BatchTopKCrossCoderTrainer) or isinstance(trainer, BatchTopKTrainer):
                     log_stats(
@@ -312,6 +317,7 @@ def trainSAE(
                         use_threshold=True,
                         stage="trainthres",
                         epoch_idx_per_step=epoch_idx_per_step,
+                        num_tokens=num_tokens,
                     )
 
         # saving

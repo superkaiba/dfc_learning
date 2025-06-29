@@ -204,17 +204,20 @@ class CrossCoderTrainer(SAETrainer):
         if not logging:
             return loss
         else:
+            log_dict = {
+                "l2_loss": l2_loss.item(),
+                "mse_loss": mse_loss.item(),
+                "sparsity_loss": l1_loss.item(),
+                "loss": loss.item(),
+                "deads": deads if return_deads else None,
+            }
+            for layer in range(x.shape[1]):
+                log_dict[f"rms_norm_l{layer}"] = th.sqrt((x[:, layer, :].pow(2).sum(-1)).mean()).item()
             return namedtuple("LossLog", ["x", "x_hat", "f", "losses"])(
                 x,
                 x_hat,
                 f,
-                {
-                    "l2_loss": l2_loss.item(),
-                    "mse_loss": mse_loss.item(),
-                    "sparsity_loss": l1_loss.item(),
-                    "loss": loss.item(),
-                    "deads": deads if return_deads else None,
-                },
+                log_dict,
             )
 
     def update(self, step, activations):
