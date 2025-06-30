@@ -98,13 +98,11 @@ class NormalizableMixin(nn.Module):
         if self.has_activation_normalizer:
             if not inplace:
                 x = x.clone()
-            # Type assertions for linter
-            assert isinstance(self.activation_mean, th.Tensor)
-            assert isinstance(self.activation_std, th.Tensor)
+            assert x.shape[1:-1] == self.activation_global_scale.shape, "Normalization shape mismatch"
             x = x - self.activation_mean
 
             if self.keep_relative_variance:
-                return (x.T * self.activation_global_scale).T
+                return x * self.activation_global_scale.unsqueeze(0).unsqueeze(-1)
             else:
                 return x / (self.activation_std + 1e-8)
         return x
@@ -123,12 +121,10 @@ class NormalizableMixin(nn.Module):
         if self.has_activation_normalizer:
             if not inplace:
                 x = x.clone()
-            # Type assertions for linter
-            assert isinstance(self.activation_mean, th.Tensor)
-            assert isinstance(self.activation_std, th.Tensor)
+            assert x.shape[1:-1] == self.activation_global_scale.shape, "Normalization shape mismatch"
 
             if self.keep_relative_variance:
-                x = (x.T / (self.activation_global_scale + 1e-8)).T
+                x = x / (self.activation_global_scale.unsqueeze(0).unsqueeze(-1) + 1e-8)
             else:
                 x = x * (self.activation_std + 1e-8)
 
