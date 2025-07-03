@@ -766,6 +766,7 @@ class PairedActivationCache:
         else:
             assert len(self.activation_cache_1) == len(self.activation_cache_2), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"  
             self._len = len(self.activation_cache_1)
+            self._sequence_ranges = self.activation_cache_1.sequence_ranges
         
         if self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None:
             assert torch.all(self.activation_cache_1.tokens[:self._len] == self.activation_cache_2.tokens[:self._len]), "Tokens do not match"
