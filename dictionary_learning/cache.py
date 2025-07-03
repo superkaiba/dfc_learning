@@ -272,8 +272,8 @@ class ActivationCache:
         self._range_to_shard_idx = np.cumsum([0] + [s.shape[0] for s in self.shards])
         if "store_tokens" in self.config and self.config["store_tokens"]:
             self._tokens = th.load(
-                os.path.join(store_dir, "tokens.pt"), weights_only=True
-            ).cpu()
+                os.path.join(store_dir, "tokens.pt"), weights_only=True, map_location=th.device("cpu")
+            )
 
         self._sequence_ranges = None
         self._mean = None
@@ -753,10 +753,27 @@ class PairedActivationCache:
     def __init__(self, store_dir_1: str, store_dir_2: str, submodule_name: str = None):
         self.activation_cache_1 = ActivationCache(store_dir_1, submodule_name)
         self.activation_cache_2 = ActivationCache(store_dir_2, submodule_name)
-        assert len(self.activation_cache_1) == len(self.activation_cache_2)
-
+        if len(self.activation_cache_1) != len(self.activation_cache_2):
+            min_len = min(len(self.activation_cache_1), len(self.activation_cache_2))
+            assert self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None, "Caches have not the same length and tokens are not stored"
+            assert torch.all(self.activation_cache_1.tokens[:min_len] == self.activation_cache_2.tokens[:min_len]), "Tokens do not match"
+            self._len = min_len
+            print(f"Warning: Caches have not the same length and tokens are not stored. Using the first {min_len} tokens.")
+            if len(self.activation_cache_1) > self._len:
+                self._sequence_ranges = self.activation_cache_2.sequence_ranges
+            else:
+                self._sequence_ranges = self.activation_cache_1.sequence_ranges
+        else:
+            assert len(self.activation_cache_1) == len(self.activation_cache_2), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"  
+            self._len = len(self.activation_cache_1)
+        
+        if self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None:
+            assert torch.all(self.activation_cache_1.tokens[:self._len] == self.activation_cache_2.tokens[:self._len]), "Tokens do not match"
+ 
+            
+            
     def __len__(self):
-        return len(self.activation_cache_1)
+        return self._len
 
     def __getitem__(self, index):
         if isinstance(index, slice):
@@ -776,17 +793,11 @@ class PairedActivationCache:
 
     @property
     def tokens(self):
-        return th.stack(
-            (self.activation_cache_1.tokens, self.activation_cache_2.tokens), dim=0
-        )
+        return th.stack((self.activation_cache_1.tokens[:self._len], self.activation_cache_2.tokens[:self._len]), dim=0)
 
     @property
     def sequence_ranges(self):
-        seq_starts_1 = self.activation_cache_1.sequence_ranges
-        seq_starts_2 = self.activation_cache_2.sequence_ranges
-        if seq_starts_1 is not None and seq_starts_2 is not None:
-            return th.stack((seq_starts_1, seq_starts_2), dim=0)
-        return None
+        return self._sequence_ranges
 
     @property
     def mean(self):
