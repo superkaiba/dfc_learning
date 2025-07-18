@@ -74,7 +74,9 @@ class NormalizableMixin(nn.Module):
             activation_global_scale = self.target_rms / th.sqrt(total_var + 1e-8)
             self.register_buffer("activation_global_scale", activation_global_scale)
         else:
-            self.register_buffer("activation_global_scale", th.ones(activation_shape[:-1]))
+            self.register_buffer(
+                "activation_global_scale", th.ones(activation_shape[:-1])
+            )
 
     @property
     def has_activation_normalizer(self) -> bool:
@@ -98,7 +100,9 @@ class NormalizableMixin(nn.Module):
         if self.has_activation_normalizer:
             if not inplace:
                 x = x.clone()
-            assert x.shape[1:-1] == self.activation_global_scale.shape, "Normalization shape mismatch"
+            assert (
+                x.shape[1:-1] == self.activation_global_scale.shape
+            ), "Normalization shape mismatch"
             x = x - self.activation_mean
 
             if self.keep_relative_variance:
@@ -121,7 +125,9 @@ class NormalizableMixin(nn.Module):
         if self.has_activation_normalizer:
             if not inplace:
                 x = x.clone()
-            assert x.shape[1:-1] == self.activation_global_scale.shape, "Normalization shape mismatch"
+            assert (
+                x.shape[1:-1] == self.activation_global_scale.shape
+            ), "Normalization shape mismatch"
 
             if self.keep_relative_variance:
                 x = x / (self.activation_global_scale.unsqueeze(0).unsqueeze(-1) + 1e-8)

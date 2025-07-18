@@ -307,7 +307,9 @@ def trainSAE(
                     epoch_idx_per_step=epoch_idx_per_step,
                     num_tokens=num_tokens,
                 )
-                if isinstance(trainer, BatchTopKCrossCoderTrainer) or isinstance(trainer, BatchTopKTrainer):
+                if isinstance(trainer, BatchTopKCrossCoderTrainer) or isinstance(
+                    trainer, BatchTopKTrainer
+                ):
                     log_stats(
                         trainer,
                         step,

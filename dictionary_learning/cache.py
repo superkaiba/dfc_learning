@@ -272,7 +272,9 @@ class ActivationCache:
         self._range_to_shard_idx = np.cumsum([0] + [s.shape[0] for s in self.shards])
         if "store_tokens" in self.config and self.config["store_tokens"]:
             self._tokens = th.load(
-                os.path.join(store_dir, "tokens.pt"), weights_only=True, map_location=th.device("cpu")
+                os.path.join(store_dir, "tokens.pt"),
+                weights_only=True,
+                map_location=th.device("cpu"),
             )
 
         self._sequence_ranges = None
@@ -309,7 +311,6 @@ class ActivationCache:
                 )
         return self._std
 
-
     @property
     def running_stats(self):
         return RunningStatWelford.load_or_create_state(
@@ -318,12 +319,17 @@ class ActivationCache:
 
     def __len__(self):
         return self.config["total_size"]
+
     def __getitem__(self, index):
         if isinstance(index, slice):
             # Handle slice objects
             start, stop, step = index.indices(len(self))
-            start_shard_idx = np.searchsorted(self._range_to_shard_idx, start, side="right") - 1
-            stop_shard_idx = np.searchsorted(self._range_to_shard_idx, stop, side="right") - 1
+            start_shard_idx = (
+                np.searchsorted(self._range_to_shard_idx, start, side="right") - 1
+            )
+            stop_shard_idx = (
+                np.searchsorted(self._range_to_shard_idx, stop, side="right") - 1
+            )
             if start_shard_idx == stop_shard_idx:
                 offset = start - self._range_to_shard_idx[start_shard_idx]
                 end_offset = stop - self._range_to_shard_idx[stop_shard_idx]
@@ -335,7 +341,9 @@ class ActivationCache:
                 return th.stack([self[i] for i in range(start, stop, step)], dim=0)
         elif isinstance(index, int):
             # Handle single integer index
-            shard_idx = np.searchsorted(self._range_to_shard_idx, index, side="right") - 1
+            shard_idx = (
+                np.searchsorted(self._range_to_shard_idx, index, side="right") - 1
+            )
             offset = index - self._range_to_shard_idx[shard_idx]
             shard = self.shards[shard_idx]
             return shard[offset]
@@ -346,7 +354,9 @@ class ActivationCache:
             else:
                 raise TypeError(f"Tensor index must be scalar, got shape {index.shape}")
         else:
-            raise TypeError(f"Index must be int, slice, or scalar tensor, got {type(index)}")
+            raise TypeError(
+                f"Index must be int, slice, or scalar tensor, got {type(index)}"
+            )
 
     @property
     def tokens(self):
@@ -354,15 +364,19 @@ class ActivationCache:
 
     @property
     def sequence_ranges(self):
-        if hasattr(self, '_sequence_ranges') and self._sequence_ranges is not None:
+        if hasattr(self, "_sequence_ranges") and self._sequence_ranges is not None:
             return self._sequence_ranges
-        
-        if ("store_sequence_ranges" in self.config and 
-            self.config["store_sequence_ranges"] and
-            os.path.exists(os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt"))):
+
+        if (
+            "store_sequence_ranges" in self.config
+            and self.config["store_sequence_ranges"]
+            and os.path.exists(
+                os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt")
+            )
+        ):
             self._sequence_ranges = th.load(
-                os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt"), 
-                weights_only=True
+                os.path.join(self._cache_store_dir, "..", "sequence_ranges.pt"),
+                weights_only=True,
             ).cpu()
             return self._sequence_ranges
         else:
@@ -483,23 +497,27 @@ class ActivationCache:
         num_tokens = 0
         config = None
         for submodule_name in submodule_names:
-            config_path = os.path.join(store_dir, f"{submodule_name}_{io}", "config.json")
+            config_path = os.path.join(
+                store_dir, f"{submodule_name}_{io}", "config.json"
+            )
             if not os.path.exists(config_path):
                 return False, 0
             with open(config_path, "r") as f:
                 config = json.load(f)
                 num_tokens = config["total_size"]
-        
+
         if store_tokens and not os.path.exists(os.path.join(store_dir, "tokens.pt")):
             return False, 0
-            
+
         # Check for sequence ranges if they should exist
-        if (config and 
-            "store_sequence_ranges" in config and 
-            config["store_sequence_ranges"] and
-            not os.path.exists(os.path.join(store_dir, "sequence_ranges.pt"))):
+        if (
+            config
+            and "store_sequence_ranges" in config
+            and config["store_sequence_ranges"]
+            and not os.path.exists(os.path.join(store_dir, "sequence_ranges.pt"))
+        ):
             return False, 0
-            
+
         return True, num_tokens
 
     @th.no_grad()
@@ -530,19 +548,16 @@ class ActivationCache:
         assert (
             not shuffle_shards or not store_tokens
         ), "Shuffling shards and storing tokens is not supported yet"
-        
-        store_sequence_ranges = (
-            store_tokens and 
-            not shuffle_shards
-        )
-  
+
+        store_sequence_ranges = store_tokens and not shuffle_shards
+
         dataloader = DataLoader(data, batch_size=batch_size, num_workers=num_workers)
 
         activation_cache = [[] for _ in submodules]
         tokens_cache = []
         sequence_ranges_cache = []
         current_token_position = 0  # Track position in flattened token stream
-        
+
         store_sub_dirs = [
             os.path.join(store_dir, f"{submodule_names[i]}_{io}")
             for i in range(len(submodules))
@@ -594,11 +609,13 @@ class ActivationCache:
             store_mask = attention_mask.clone()
             if ignore_first_n_tokens_per_sample > 0:
                 store_mask[:, :ignore_first_n_tokens_per_sample] = 0
-            
+
             # Track sequence ranges if needed
             if store_sequence_ranges:
                 batch_lengths = store_mask.sum(dim=1).tolist()
-                batch_sequence_ranges = np.cumsum([0] + batch_lengths[:-1]) + current_token_position
+                batch_sequence_ranges = (
+                    np.cumsum([0] + batch_lengths[:-1]) + current_token_position
+                )
                 sequence_ranges_cache.extend(batch_sequence_ranges.tolist())
                 current_token_position += sum(batch_lengths)
 
@@ -733,7 +750,9 @@ class ActivationCache:
             sequence_ranges_cache.append(current_token_position)
             assert sequence_ranges_cache[-1] == total_size
             sequence_ranges_tensor = th.tensor(sequence_ranges_cache, dtype=th.long)
-            th.save(sequence_ranges_tensor, os.path.join(store_dir, "sequence_ranges.pt"))
+            th.save(
+                sequence_ranges_tensor, os.path.join(store_dir, "sequence_ranges.pt")
+            )
             print(f"Stored {len(sequence_ranges_cache)} sequence ranges")
 
         # store running stats
@@ -755,24 +774,38 @@ class PairedActivationCache:
         self.activation_cache_2 = ActivationCache(store_dir_2, submodule_name)
         if len(self.activation_cache_1) != len(self.activation_cache_2):
             min_len = min(len(self.activation_cache_1), len(self.activation_cache_2))
-            assert self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None, "Caches have not the same length and tokens are not stored"
-            assert torch.all(self.activation_cache_1.tokens[:min_len] == self.activation_cache_2.tokens[:min_len]), "Tokens do not match"
+            assert (
+                self.activation_cache_1.tokens is not None
+                and self.activation_cache_2.tokens is not None
+            ), "Caches have not the same length and tokens are not stored"
+            assert torch.all(
+                self.activation_cache_1.tokens[:min_len]
+                == self.activation_cache_2.tokens[:min_len]
+            ), "Tokens do not match"
             self._len = min_len
-            print(f"Warning: Caches have not the same length and tokens are not stored. Using the first {min_len} tokens.")
+            print(
+                f"Warning: Caches have not the same length. Using the first {min_len} tokens."
+            )
             if len(self.activation_cache_1) > self._len:
                 self._sequence_ranges = self.activation_cache_2.sequence_ranges
             else:
                 self._sequence_ranges = self.activation_cache_1.sequence_ranges
         else:
-            assert len(self.activation_cache_1) == len(self.activation_cache_2), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"  
+            assert len(self.activation_cache_1) == len(
+                self.activation_cache_2
+            ), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"
             self._len = len(self.activation_cache_1)
             self._sequence_ranges = self.activation_cache_1.sequence_ranges
-        
-        if self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None:
-            assert torch.all(self.activation_cache_1.tokens[:self._len] == self.activation_cache_2.tokens[:self._len]), "Tokens do not match"
- 
-            
-            
+
+        if (
+            self.activation_cache_1.tokens is not None
+            and self.activation_cache_2.tokens is not None
+        ):
+            assert torch.all(
+                self.activation_cache_1.tokens[: self._len]
+                == self.activation_cache_2.tokens[: self._len]
+            ), "Tokens do not match"
+
     def __len__(self):
         return self._len
 
@@ -794,7 +827,13 @@ class PairedActivationCache:
 
     @property
     def tokens(self):
-        return th.stack((self.activation_cache_1.tokens[:self._len], self.activation_cache_2.tokens[:self._len]), dim=0)
+        return th.stack(
+            (
+                self.activation_cache_1.tokens[: self._len],
+                self.activation_cache_2.tokens[: self._len],
+            ),
+            dim=0,
+        )
 
     @property
     def sequence_ranges(self):
@@ -811,7 +850,6 @@ class PairedActivationCache:
         return th.stack(
             (self.activation_cache_1.std, self.activation_cache_2.std), dim=0
         )
-
 
 
 class ActivationCacheTuple:
