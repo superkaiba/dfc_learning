@@ -2,6 +2,7 @@
 This repo contains a few new features compared to the original repo:
 - It is `pip` installable.
 - A new `Crosscoder` class for training CrossCoders as described in [the anthropic paper](https://transformer-circuits.pub/drafts/crosscoders/index.html#model-diffing).
+- BatchTopKCrossCoder as described in [our paper](https://arxiv.org/pdf/2504.02922)
 ```py
 !pip install git+https://github.com/jkminder/dictionary_learning
 from dictionary_learning import CrossCoder
