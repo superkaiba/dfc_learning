@@ -33,7 +33,7 @@ class NormalizableMixin(nn.Module):
         activation_shape: tuple[int, ...] | None = None,
         *,
         keep_relative_variance: bool = True,
-        target_rms: float = 1.0,
+        target_rms: float | None = 1.0,
     ):
         """
         Initialize the normalization mixin.
@@ -50,6 +50,8 @@ class NormalizableMixin(nn.Module):
         """
         super().__init__()
         self.keep_relative_variance = keep_relative_variance
+        if target_rms is None:
+            target_rms = 1.0
         self.register_buffer("target_rms", th.tensor(target_rms))
         if activation_mean is not None and activation_std is not None:
             # Type assertion to help linter understand these are tensors
