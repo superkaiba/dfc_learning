@@ -212,7 +212,9 @@ class CrossCoderTrainer(SAETrainer):
                 "deads": deads if return_deads else None,
             }
             for layer in range(x.shape[1]):
-                log_dict[f"rms_norm_l{layer}"] = th.sqrt((x[:, layer, :].pow(2).sum(-1)).mean()).item()
+                log_dict[f"rms_norm_l{layer}"] = th.sqrt(
+                    (x[:, layer, :].pow(2).sum(-1)).mean()
+                ).item()
             return namedtuple("LossLog", ["x", "x_hat", "f", "losses"])(
                 x,
                 x_hat,
