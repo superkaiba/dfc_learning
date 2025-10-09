@@ -5,5 +5,8 @@ from .dictionary import (
     CrossCoder,
     BatchTopKSAE,
     BatchTopKCrossCoder,
+    DedicatedFeatureCrossCoder,
+    DedicatedFeatureBatchTopKCrossCoder,
 )
+from .feature_partition import FeaturePartition
 from .buffer import ActivationBuffer

@@ -15,6 +15,7 @@ from typing import Callable
 from enum import Enum, auto
 from abc import ABC, abstractmethod
 from .utils import set_decoder_norm_to_unit_norm
+from .feature_partition import FeaturePartition
 
 
 class NormalizableMixin(nn.Module):
@@ -1784,3 +1785,609 @@ class BatchTopKCrossCoder(CrossCoder):
         if device is not None:
             crosscoder = crosscoder.to(device)
         return crosscoder.to(dtype=dtype)
+
+
+class DedicatedFeatureCrossCoderEncoder(CrossCoderEncoder):
+    """CrossCoder encoder with architectural feature partitioning.
+
+    This encoder extends the standard CrossCoderEncoder by enforcing architectural
+    constraints that prevent certain features from being encoded by certain layers:
+    - Layer 0 (Model A) cannot encode to Model B exclusive features
+    - Layer 1 (Model B) cannot encode to Model A exclusive features
+    - Both layers can encode to shared features
+
+    The constraints are enforced through gradient masking: gradients for forbidden
+    features are zeroed during backpropagation, preventing any parameter updates
+    or momentum accumulation in the optimizer.
+
+    Args:
+        activation_dim: Dimension of input activations for each layer
+        dict_size: Number of features in the dictionary
+        num_layers: Number of layers (typically 2 for model pairs)
+        partition: FeaturePartition object defining the feature splits
+        **kwargs: Additional arguments passed to CrossCoderEncoder
+
+    Example:
+        >>> partition = FeaturePartition(dict_size=1000, model_a_exclusive_size=50, model_b_exclusive_size=50)
+        >>> encoder = DedicatedFeatureCrossCoderEncoder(512, 1000, 2, partition)
+        >>> # Layer 0 weights for B-exclusive features will always be zero
+    """
+
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        num_layers: int,
+        partition: FeaturePartition,
+        **kwargs
+    ):
+        """Initialize encoder with feature partitioning constraints."""
+        super().__init__(activation_dim, dict_size, num_layers, **kwargs)
+        self.partition = partition
+
+        # Initialize forbidden weights to zero
+        self._initialize_masked_weights()
+
+        # Register gradient hooks to enforce constraints
+        self._register_gradient_hooks()
+
+    def _initialize_masked_weights(self):
+        """Set forbidden encoder weights to zero.
+
+        This ensures that at initialization, Model A has zero weights for
+        B-exclusive features and vice versa.
+        """
+        with th.no_grad():
+            for layer_idx in range(self.num_layers):
+                mask = self.partition.get_encoder_mask(layer_idx, device=self.weight.device)
+                # Encoder weight shape: (num_layers, activation_dim, dict_size)
+                # Apply mask to dict_size dimension
+                self.weight.data[layer_idx] *= mask.unsqueeze(0)
+
+    def _register_gradient_hooks(self):
+        """Register hooks to mask gradients for forbidden features.
+
+        This is the critical component that prevents gradient flow to
+        forbidden parameters. The hook modifies gradients during backpropagation,
+        ensuring that:
+        1. Forbidden weights never receive gradient updates
+        2. Optimizer momentum (exp_avg, exp_avg_sq) never accumulates for forbidden weights
+        3. Auxiliary loss doesn't leak gradients to the wrong model's features
+        """
+        def encoder_grad_hook(grad):
+            """Mask gradients to zero for forbidden features."""
+            if grad is None:
+                return grad
+
+            masked_grad = grad.clone()
+            for layer_idx in range(self.num_layers):
+                mask = self.partition.get_encoder_mask(layer_idx, device=grad.device)
+                # Apply mask to dict_size dimension
+                masked_grad[layer_idx] *= mask.unsqueeze(0)
+
+            return masked_grad
+
+        self.weight.register_hook(encoder_grad_hook)
+
+        # Note: Bias can be shared across layers, no masking needed
+        # All features can have bias since bias is global
+
+
+class DedicatedFeatureCrossCoderDecoder(CrossCoderDecoder):
+    """CrossCoder decoder with architectural feature partitioning.
+
+    This decoder extends the standard CrossCoderDecoder by enforcing architectural
+    constraints that prevent certain features from being decoded by certain layers:
+    - Layer 0 (Model A) cannot decode from Model B exclusive features
+    - Layer 1 (Model B) cannot decode from Model A exclusive features
+    - Both layers can decode from shared features
+
+    The constraints are enforced through gradient masking: gradients for forbidden
+    features are zeroed during backpropagation, preventing any parameter updates
+    or momentum accumulation in the optimizer.
+
+    Args:
+        activation_dim: Dimension of output activations for each layer
+        dict_size: Number of features in the dictionary
+        num_layers: Number of layers (typically 2 for model pairs)
+        partition: FeaturePartition object defining the feature splits
+        **kwargs: Additional arguments passed to CrossCoderDecoder
+
+    Example:
+        >>> partition = FeaturePartition(dict_size=1000, model_a_exclusive_size=50, model_b_exclusive_size=50)
+        >>> decoder = DedicatedFeatureCrossCoderDecoder(512, 1000, 2, partition)
+        >>> # Layer 0 weights for B-exclusive features will always be zero
+    """
+
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        num_layers: int,
+        partition: FeaturePartition,
+        **kwargs
+    ):
+        """Initialize decoder with feature partitioning constraints."""
+        super().__init__(activation_dim, dict_size, num_layers, **kwargs)
+        self.partition = partition
+
+        # Initialize forbidden weights to zero
+        self._initialize_masked_weights()
+
+        # Register gradient hooks to enforce constraints
+        self._register_gradient_hooks()
+
+    def _initialize_masked_weights(self):
+        """Set forbidden decoder weights to zero.
+
+        This ensures that at initialization, Model A has zero weights for
+        B-exclusive features and vice versa.
+        """
+        with th.no_grad():
+            for layer_idx in range(self.num_layers):
+                mask = self.partition.get_decoder_mask(layer_idx, device=self.weight.device)
+                # Decoder weight shape: (num_layers, dict_size, activation_dim)
+                # Apply mask to dict_size dimension
+                self.weight.data[layer_idx] *= mask.unsqueeze(1)
+
+    def _register_gradient_hooks(self):
+        """Register hooks to mask gradients for forbidden features.
+
+        This is the critical component that prevents gradient flow to
+        forbidden parameters, especially important for auxiliary loss
+        which reconstructs activations for both models.
+        """
+        def decoder_grad_hook(grad):
+            """Mask gradients to zero for forbidden features."""
+            if grad is None:
+                return grad
+
+            masked_grad = grad.clone()
+            for layer_idx in range(self.num_layers):
+                mask = self.partition.get_decoder_mask(layer_idx, device=grad.device)
+                # Apply mask to dict_size dimension
+                masked_grad[layer_idx] *= mask.unsqueeze(1)
+
+            return masked_grad
+
+        self.weight.register_hook(decoder_grad_hook)
+
+        # Note: Bias is per-layer, no masking needed
+
+
+class DedicatedFeatureCrossCoder(CrossCoder):
+    """CrossCoder with dedicated feature partitions for model diffing.
+
+    This class implements the Dedicated Feature Crosscoder (DFC) architecture,
+    which partitions the feature dictionary into model-exclusive and shared subspaces.
+    Architectural constraints prevent cross-contamination between exclusive features:
+    - Model A can only encode/decode from A-exclusive + shared features
+    - Model B can only encode/decode from B-exclusive + shared features
+
+    The partition is enforced through gradient masking, ensuring that forbidden
+    weights remain zero throughout training and that optimizer momentum never
+    accumulates for these parameters.
+
+    This architecture is designed for model diffing applications where the goal
+    is to identify behavioral differences between two models. By dedicating
+    features to each model, the DFC has an architectural prior favoring
+    model-exclusive feature discovery.
+
+    Args:
+        activation_dim: Dimension of input activations
+        dict_size: Total number of features in the dictionary
+        num_layers: Number of layers (typically 2 for model pairs)
+        model_a_exclusive_pct: Percentage of features for Model A (e.g., 0.05 for 5%)
+        model_b_exclusive_pct: Percentage of features for Model B (e.g., 0.05 for 5%)
+        **kwargs: Additional arguments passed to CrossCoder
+
+    Example:
+        >>> dfc = DedicatedFeatureCrossCoder(
+        ...     activation_dim=512,
+        ...     dict_size=16384,
+        ...     num_layers=2,
+        ...     model_a_exclusive_pct=0.05,
+        ...     model_b_exclusive_pct=0.05
+        ... )
+        >>> # First 819 features exclusive to Model A
+        >>> # Next 819 features exclusive to Model B
+        >>> # Remaining 14746 features shared
+    """
+
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        num_layers: int,
+        model_a_exclusive_pct: float = 0.05,
+        model_b_exclusive_pct: float = 0.05,
+        **kwargs
+    ):
+        """Initialize DFC with feature partitioning."""
+        # Create partition before calling super().__init__
+        self.partition = FeaturePartition.from_percentages(
+            dict_size, model_a_exclusive_pct, model_b_exclusive_pct
+        )
+
+        # Store partition config for serialization
+        self._partition_config = {
+            'dict_size': dict_size,
+            'model_a_exclusive_pct': model_a_exclusive_pct,
+            'model_b_exclusive_pct': model_b_exclusive_pct,
+        }
+
+        # Call parent constructor (will create encoder/decoder)
+        # We'll replace them below with partitioned versions
+        super().__init__(
+            activation_dim, dict_size, num_layers,
+            **kwargs
+        )
+
+        # Extract initialization parameters
+        same_init = kwargs.get('same_init_for_all_layers', False)
+        norm_scale = kwargs.get('norm_init_scale', None)
+        enc_layers = kwargs.get('encoder_layers', None)
+        init_transpose = kwargs.get('init_with_transpose', True)
+
+        # Replace encoder with partitioned version
+        self.encoder = DedicatedFeatureCrossCoderEncoder(
+            activation_dim, dict_size, num_layers,
+            partition=self.partition,
+            same_init_for_all_layers=same_init,
+            norm_init_scale=norm_scale,
+            encoder_layers=enc_layers,
+        )
+
+        # Decoder initialization
+        if init_transpose:
+            decoder_weight = einops.rearrange(
+                self.encoder.weight.data.clone(),
+                "num_layers activation_dim dict_size -> num_layers dict_size activation_dim",
+            )
+        else:
+            decoder_weight = None
+
+        self.decoder = DedicatedFeatureCrossCoderDecoder(
+            activation_dim, dict_size, num_layers,
+            partition=self.partition,
+            same_init_for_all_layers=same_init,
+            norm_init_scale=norm_scale,
+            init_with_weight=decoder_weight,
+        )
+
+    def verify_partition_integrity(self, tolerance: float = 1e-6) -> dict:
+        """Verify that forbidden weights remain zero.
+
+        This is a diagnostic method useful for debugging and monitoring.
+        It checks that all weights that should be zero (based on the partition)
+        are indeed zero (or very close to it).
+
+        Args:
+            tolerance: Maximum allowed absolute value for "zero" weights
+
+        Returns:
+            Dictionary with max absolute violation for each layer's encoder/decoder
+
+        Example:
+            >>> integrity = dfc.verify_partition_integrity()
+            >>> print(integrity)
+            {'encoder': {'layer_0': 1.2e-7, 'layer_1': 3.4e-8},
+             'decoder': {'layer_0': 2.1e-7, 'layer_1': 1.5e-7}}
+        """
+        results = {'encoder': {}, 'decoder': {}}
+
+        with th.no_grad():
+            for layer_idx in range(self.num_layers):
+                # Check encoder
+                enc_mask = self.partition.get_encoder_mask(layer_idx, device=self.encoder.weight.device)
+                # Encoder weight: (num_layers, activation_dim, dict_size)
+                forbidden_enc = self.encoder.weight[layer_idx] * (1 - enc_mask).unsqueeze(0)
+                max_enc_violation = forbidden_enc.abs().max().item()
+                results['encoder'][f'layer_{layer_idx}'] = max_enc_violation
+
+                # Check decoder
+                dec_mask = self.partition.get_decoder_mask(layer_idx, device=self.decoder.weight.device)
+                # Decoder weight: (num_layers, dict_size, activation_dim)
+                forbidden_dec = self.decoder.weight[layer_idx] * (1 - dec_mask).unsqueeze(1)
+                max_dec_violation = forbidden_dec.abs().max().item()
+                results['decoder'][f'layer_{layer_idx}'] = max_dec_violation
+
+        return results
+
+    def get_partition_statistics(self) -> dict:
+        """Get statistics about feature partition usage.
+
+        Returns:
+            Dictionary with partition sizes and percentages
+
+        Example:
+            >>> stats = dfc.get_partition_statistics()
+            >>> print(stats)
+            {'total_features': 16384,
+             'model_a_exclusive': 819,
+             'model_b_exclusive': 819,
+             'shared': 14746,
+             'model_a_exclusive_pct': 0.05,
+             'model_b_exclusive_pct': 0.05,
+             'shared_pct': 0.90}
+        """
+        return {
+            'total_features': self.partition.dict_size,
+            'model_a_exclusive': len(self.partition.model_a_indices),
+            'model_b_exclusive': len(self.partition.model_b_indices),
+            'shared': len(self.partition.shared_indices),
+            'model_a_exclusive_pct': len(self.partition.model_a_indices) / self.partition.dict_size,
+            'model_b_exclusive_pct': len(self.partition.model_b_indices) / self.partition.dict_size,
+            'shared_pct': len(self.partition.shared_indices) / self.partition.dict_size,
+        }
+
+    def state_dict(self, *args, **kwargs):
+        """Override to include partition config in saved state."""
+        state = super().state_dict(*args, **kwargs)
+        state['_partition_config'] = self._partition_config
+        return state
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Override to restore partition config from saved state."""
+        if '_partition_config' in state_dict:
+            self._partition_config = state_dict.pop('_partition_config')
+            # Recreate partition
+            self.partition = FeaturePartition.from_percentages(
+                self._partition_config['dict_size'],
+                self._partition_config['model_a_exclusive_pct'],
+                self._partition_config['model_b_exclusive_pct'],
+            )
+        super().load_state_dict(state_dict, strict=strict)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path: str,
+        dtype: th.dtype = th.float32,
+        device: th.device | None = None,
+        from_hub: bool = False,
+        **kwargs
+    ):
+        """Load pretrained DFC, restoring partition configuration.
+
+        Args:
+            path: Path to saved model or hub identifier
+            dtype: Data type for model parameters
+            device: Device to load model on
+            from_hub: Whether to load from HuggingFace hub
+            **kwargs: Additional arguments
+
+        Returns:
+            Loaded DedicatedFeatureCrossCoder instance
+        """
+        if from_hub:
+            return super().from_pretrained(path, device=device, dtype=dtype, from_hub=True, **kwargs)
+
+        state_dict = th.load(path, map_location="cpu", weights_only=True)
+
+        # Extract partition config
+        if '_partition_config' not in state_dict:
+            warn(
+                f"No partition config found in {path}. "
+                "This may not be a DFC model or was saved with an older version."
+            )
+            # Try to construct with default percentages
+            partition_config = {'model_a_exclusive_pct': 0.05, 'model_b_exclusive_pct': 0.05}
+        else:
+            partition_config = state_dict.pop('_partition_config')
+
+        # Get model dimensions from weights
+        num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
+
+        # Create instance
+        dfc = cls(
+            activation_dim=activation_dim,
+            dict_size=dict_size,
+            num_layers=num_layers,
+            model_a_exclusive_pct=partition_config['model_a_exclusive_pct'],
+            model_b_exclusive_pct=partition_config['model_b_exclusive_pct'],
+            **kwargs
+        )
+
+        # Load weights
+        dfc.load_state_dict(state_dict)
+
+        if device is not None:
+            dfc = dfc.to(device)
+        return dfc.to(dtype=dtype)
+
+
+class DedicatedFeatureBatchTopKCrossCoder(BatchTopKCrossCoder):
+    """DFC with BatchTopK sparsity constraint.
+
+    This is the primary class for DFC training, matching the architecture used
+    in the paper. It combines dedicated feature partitioning with BatchTopK sparsity,
+    where only the top-k most active features across the entire batch are kept.
+
+    The partition enforces architectural constraints through gradient masking,
+    while BatchTopK enforces sparsity through activation selection. Together,
+    these mechanisms enable discovery of model-exclusive features.
+
+    Args:
+        activation_dim: Dimension of input activations
+        dict_size: Total number of features
+        num_layers: Number of layers (typically 2)
+        k: BatchTopK parameter (number of active features per example)
+        model_a_exclusive_pct: Percentage of features for Model A
+        model_b_exclusive_pct: Percentage of features for Model B
+        **kwargs: Additional arguments
+
+    Example:
+        >>> dfc = DedicatedFeatureBatchTopKCrossCoder(
+        ...     activation_dim=2304,
+        ...     dict_size=131072,
+        ...     num_layers=2,
+        ...     k=200,
+        ...     model_a_exclusive_pct=0.05,
+        ...     model_b_exclusive_pct=0.05
+        ... )
+        >>> # Training with existing BatchTopKCrossCoderTrainer works directly
+    """
+
+    def __init__(
+        self,
+        activation_dim: int,
+        dict_size: int,
+        num_layers: int,
+        k: int,
+        model_a_exclusive_pct: float = 0.05,
+        model_b_exclusive_pct: float = 0.05,
+        **kwargs
+    ):
+        """Initialize DFC with BatchTopK sparsity."""
+        # Create partition before calling super().__init__
+        self.partition = FeaturePartition.from_percentages(
+            dict_size, model_a_exclusive_pct, model_b_exclusive_pct
+        )
+
+        # Store partition config for serialization
+        self._partition_config = {
+            'dict_size': dict_size,
+            'model_a_exclusive_pct': model_a_exclusive_pct,
+            'model_b_exclusive_pct': model_b_exclusive_pct,
+        }
+
+        # Initialize BatchTopKCrossCoder parent
+        super().__init__(
+            activation_dim=activation_dim,
+            dict_size=dict_size,
+            num_layers=num_layers,
+            k=k,
+            **kwargs
+        )
+
+        # Extract initialization parameters
+        same_init = kwargs.get('same_init_for_all_layers', False)
+        norm_scale = kwargs.get('norm_init_scale', None)
+        enc_layers = kwargs.get('encoder_layers', None)
+        init_transpose = kwargs.get('init_with_transpose', True)
+
+        # Replace encoder with partitioned version
+        self.encoder = DedicatedFeatureCrossCoderEncoder(
+            activation_dim, dict_size, num_layers,
+            partition=self.partition,
+            same_init_for_all_layers=same_init,
+            norm_init_scale=norm_scale,
+            encoder_layers=enc_layers,
+        )
+
+        # Decoder initialization
+        if init_transpose:
+            decoder_weight = einops.rearrange(
+                self.encoder.weight.data.clone(),
+                "num_layers activation_dim dict_size -> num_layers dict_size activation_dim",
+            )
+        else:
+            decoder_weight = None
+
+        self.decoder = DedicatedFeatureCrossCoderDecoder(
+            activation_dim, dict_size, num_layers,
+            partition=self.partition,
+            same_init_for_all_layers=same_init,
+            norm_init_scale=norm_scale,
+            init_with_weight=decoder_weight,
+        )
+
+    # Inherit methods from DedicatedFeatureCrossCoder
+    def verify_partition_integrity(self, tolerance: float = 1e-6) -> dict:
+        """Verify that forbidden weights remain zero."""
+        results = {'encoder': {}, 'decoder': {}}
+
+        with th.no_grad():
+            for layer_idx in range(self.num_layers):
+                enc_mask = self.partition.get_encoder_mask(layer_idx, device=self.encoder.weight.device)
+                forbidden_enc = self.encoder.weight[layer_idx] * (1 - enc_mask).unsqueeze(0)
+                max_enc_violation = forbidden_enc.abs().max().item()
+                results['encoder'][f'layer_{layer_idx}'] = max_enc_violation
+
+                dec_mask = self.partition.get_decoder_mask(layer_idx, device=self.decoder.weight.device)
+                forbidden_dec = self.decoder.weight[layer_idx] * (1 - dec_mask).unsqueeze(1)
+                max_dec_violation = forbidden_dec.abs().max().item()
+                results['decoder'][f'layer_{layer_idx}'] = max_dec_violation
+
+        return results
+
+    def get_partition_statistics(self) -> dict:
+        """Get statistics about feature partition usage."""
+        return {
+            'total_features': self.partition.dict_size,
+            'model_a_exclusive': len(self.partition.model_a_indices),
+            'model_b_exclusive': len(self.partition.model_b_indices),
+            'shared': len(self.partition.shared_indices),
+            'model_a_exclusive_pct': len(self.partition.model_a_indices) / self.partition.dict_size,
+            'model_b_exclusive_pct': len(self.partition.model_b_indices) / self.partition.dict_size,
+            'shared_pct': len(self.partition.shared_indices) / self.partition.dict_size,
+        }
+
+    def state_dict(self, *args, **kwargs):
+        """Override to include partition config in saved state."""
+        state = super().state_dict(*args, **kwargs)
+        state['_partition_config'] = self._partition_config
+        return state
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Override to restore partition config from saved state."""
+        if '_partition_config' in state_dict:
+            self._partition_config = state_dict.pop('_partition_config')
+            self.partition = FeaturePartition.from_percentages(
+                self._partition_config['dict_size'],
+                self._partition_config['model_a_exclusive_pct'],
+                self._partition_config['model_b_exclusive_pct'],
+            )
+        super().load_state_dict(state_dict, strict=strict)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path: str,
+        dtype: th.dtype = th.float32,
+        device: th.device | None = None,
+        from_hub: bool = False,
+        **kwargs
+    ):
+        """Load pretrained DFC, restoring partition configuration."""
+        if from_hub:
+            return super().from_pretrained(path, device=device, dtype=dtype, from_hub=True, **kwargs)
+
+        state_dict = th.load(path, map_location="cpu", weights_only=True)
+
+        # Extract partition config
+        if '_partition_config' not in state_dict:
+            warn(
+                f"No partition config found in {path}. "
+                "This may not be a DFC model or was saved with an older version."
+            )
+            partition_config = {'model_a_exclusive_pct': 0.05, 'model_b_exclusive_pct': 0.05}
+        else:
+            partition_config = state_dict.pop('_partition_config')
+
+        # Get model dimensions
+        num_layers, activation_dim, dict_size = state_dict["encoder.weight"].shape
+
+        # Extract k from state dict
+        k = state_dict.get("k", kwargs.get("k", 100))
+        if isinstance(k, th.Tensor):
+            k = k.item()
+
+        # Create instance
+        dfc = cls(
+            activation_dim=activation_dim,
+            dict_size=dict_size,
+            num_layers=num_layers,
+            k=k,
+            model_a_exclusive_pct=partition_config['model_a_exclusive_pct'],
+            model_b_exclusive_pct=partition_config['model_b_exclusive_pct'],
+            **kwargs
+        )
+
+        # Load weights
+        dfc.load_state_dict(state_dict)
+
+        if device is not None:
+            dfc = dfc.to(device)
+        return dfc.to(dtype=dtype)

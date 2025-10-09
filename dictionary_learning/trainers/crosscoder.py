@@ -4,7 +4,7 @@ Implements the CrossCoder training scheme.
 
 import torch as th
 from ..trainers.trainer import SAETrainer
-from ..dictionary import CrossCoder, BatchTopKCrossCoder
+from ..dictionary import CrossCoder, BatchTopKCrossCoder, DedicatedFeatureBatchTopKCrossCoder
 from collections import namedtuple
 from typing import Optional
 from ..trainers.trainer import get_lr_schedule
@@ -418,6 +418,10 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
 
         self.scheduler = th.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_fn)
 
+        # If using a DFC, zero optimizer state for forbidden parameters
+        if isinstance(self.ae, DedicatedFeatureBatchTopKCrossCoder):
+            self._zero_forbidden_optimizer_state()
+
     def get_auxiliary_loss(
         self,
         residual_BD: th.Tensor,
@@ -705,6 +709,67 @@ class BatchTopKCrossCoderTrainer(SAETrainer):
             "dict_class_kwargs": {k: str(v) for k, v in self.dict_class_kwargs.items()},
             "target_rms": self.target_rms,
         }
+
+    def _zero_forbidden_optimizer_state(self):
+        """Zero optimizer momentum for forbidden parameters in DFC.
+
+        This ensures Adam's momentum doesn't accumulate for parameters
+        that should always be zero due to architectural constraints.
+        Called during initialization if the model is a DFC.
+        """
+        if not hasattr(self.ae, 'partition'):
+            return
+
+        state_dict = self.optimizer.state_dict()['state']
+
+        # Find parameter IDs for encoder and decoder weights
+        param_to_id = {id(p): i for i, p in enumerate(self.ae.parameters())}
+        encoder_id = param_to_id.get(id(self.ae.encoder.weight))
+        decoder_id = param_to_id.get(id(self.ae.decoder.weight))
+
+        if encoder_id is not None and encoder_id in state_dict:
+            for layer_idx in range(self.ae.num_layers):
+                mask = self.ae.partition.get_encoder_mask(layer_idx, device=self.device)
+                # Encoder weight shape: (num_layers, activation_dim, dict_size)
+                mask_expanded = mask.unsqueeze(0)  # (1, dict_size)
+                if 'exp_avg' in state_dict[encoder_id]:
+                    state_dict[encoder_id]['exp_avg'][layer_idx] *= mask_expanded
+                if 'exp_avg_sq' in state_dict[encoder_id]:
+                    state_dict[encoder_id]['exp_avg_sq'][layer_idx] *= mask_expanded
+
+        if decoder_id is not None and decoder_id in state_dict:
+            for layer_idx in range(self.ae.num_layers):
+                mask = self.ae.partition.get_decoder_mask(layer_idx, device=self.device)
+                # Decoder weight shape: (num_layers, dict_size, activation_dim)
+                mask_expanded = mask.unsqueeze(1)  # (dict_size, 1)
+                if 'exp_avg' in state_dict[decoder_id]:
+                    state_dict[decoder_id]['exp_avg'][layer_idx] *= mask_expanded
+                if 'exp_avg_sq' in state_dict[decoder_id]:
+                    state_dict[decoder_id]['exp_avg_sq'][layer_idx] *= mask_expanded
+
+    def get_logging_parameters(self):
+        """Get parameters to log during training.
+
+        For DFCs, includes partition integrity checks to monitor that
+        forbidden weights remain zero throughout training.
+
+        Returns:
+            Dictionary of logging parameters
+        """
+        params = {}
+
+        # Add standard logging parameters
+        for param_name in self.logging_parameters:
+            if hasattr(self, param_name):
+                params[param_name] = getattr(self, param_name)
+
+        # Add DFC-specific logging
+        if isinstance(self.ae, DedicatedFeatureBatchTopKCrossCoder):
+            integrity = self.ae.verify_partition_integrity()
+            params['partition_integrity_encoder_max'] = max(integrity['encoder'].values())
+            params['partition_integrity_decoder_max'] = max(integrity['decoder'].values())
+
+        return params
 
     @staticmethod
     def geometric_median(points: th.Tensor, max_iter: int = 100, tol: float = 1e-5):
