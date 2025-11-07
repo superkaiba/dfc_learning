@@ -1,24 +1,67 @@
 # Dictionary Learning and Crosscoders
 
-This is a fork of the [dictionary_learning](https://github.com/jkminder/dictionary_learning) repository (originally by [saprmarks](https://github.com/saprmarks/dictionary_learning)), extended with the following features:
+## Table of Contents
 
-- It is `pip` installable.
-- A new `Crosscoder` class for training CrossCoders as described in [the anthropic paper](https://transformer-circuits.pub/drafts/crosscoders/index.html#model-diffing).
-- `BatchTopKCrossCoder` as described in [our paper](https://arxiv.org/pdf/2504.02922)
-- **Dedicated Feature Crosscoders (DFCs)** for improved model diffing with feature partitioning
+**New in This Fork:**
+- [About This Repository](#about-this-repository) - Fork lineage and feature history
+- [Installation](#installation)
+- [Dedicated Feature Crosscoders (DFCs)](#dedicated-feature-crosscoders-dfcs) - ⭐ NEW: Feature partitioning for model diffing
+
+**From Previous Forks & Original:**
+- [Using Trained Dictionaries](#using-trained-dictionaries)
+- [Training Your Own Dictionaries](#training-your-own-dictionaries)
+- [Downloading Pre-trained Dictionaries](#downloading-our-open-source-dictionaries)
+- [Dictionary Statistics](#statistics-for-our-dictionaries)
+
+---
+
+## About This Repository
+
+This repository is a fork of [science-of-finetuning/crosscoder_learning](https://github.com/science-of-finetuning/crosscoder_learning), which is itself a fork of the original [saprmarks/dictionary_learning](https://github.com/saprmarks/dictionary_learning).
+
+### Fork Chain and Features
+
+**Original: [saprmarks/dictionary_learning](https://github.com/saprmarks/dictionary_learning)**
+- Foundation for dictionary learning via sparse autoencoders (SAEs) on neural network activations
+- Multiple SAE architectures: Standard, Gated, Top-K
+- Training infrastructure with neuron resampling and LR warmup
+- Integration with `nnsight` for activation extraction
+
+**Fork 1: [science-of-finetuning/crosscoder_learning](https://github.com/science-of-finetuning/crosscoder_learning)**
+- `pip` installable package
+- `CrossCoder` class for comparing model variants ([Anthropic paper](https://transformer-circuits.pub/drafts/crosscoders/index.html#model-diffing))
+- `BatchTopKCrossCoder` with batch-wise top-k sparsity ([paper](https://arxiv.org/pdf/2504.02922))
+- Activation caching system (`cache.py`) for efficient training
+- Training scripts for CrossCoders with pre-computed activations (`scripts/train_crosscoder.py`)
+- HuggingFace Hub integration (`push_to_hub()`, `from_pretrained(..., from_hub=True)`)
+
+**Fork 2: This Repository (superkaiba/dfc_learning)** - **NEW**
+- **Dedicated Feature Crosscoders (DFCs)** with feature partitioning for improved model diffing
+  - Model-exclusive and shared feature subspaces
+  - Gradient masking to prevent auxiliary loss leakage
+  - Comprehensive test suite (19 tests) validating partition integrity
+  - Drop-in compatible with existing `BatchTopKCrossCoderTrainer`
 
 ## Installation
-```py
-!pip install git+https://github.com/superkaiba/dfc_learning
+```bash
+pip install git+https://github.com/superkaiba/dfc_learning
+```
+
+### Quick Start: Using CrossCoders
+```python
 from dictionary_learning import CrossCoder, DedicatedFeatureBatchTopKCrossCoder
 from nnsight import LanguageModel
 import torch as th
 
+# Load pretrained crosscoder
 crosscoder = CrossCoder.from_pretrained("Butanium/gemma-2-2b-crosscoder-l13-mu4.1e-02-lr1e-04", from_hub=True)
+
+# Load models
 gemma_2 = LanguageModel("google/gemma-2-2b", device_map="cuda:0")
 gemma_2_it = LanguageModel("google/gemma-2-2b-it", device_map="cuda:1")
 prompt = "quick fox brown"
 
+# Extract activations
 with gemma_2.trace(prompt):
     l13_act_base = gemma_2.model.layers[13].output[0][:, -1].save() # (1, 2304)
     gemma_2.model.layers[13].output.stop()
@@ -27,20 +70,21 @@ with gemma_2_it.trace(prompt):
     l13_act_it = gemma_2_it.model.layers[13].output[0][:, -1].save() # (1, 2304)
     gemma_2_it.model.layers[13].output.stop()
 
-
+# Run crosscoder
 crosscoder_input = th.cat([l13_act_base, l13_act_it], dim=0).unsqueeze(0).cpu() # (batch, 2, 2304)
-print(crosscoder_input.shape)
 reconstruction, features = crosscoder(crosscoder_input, output_features=True)
 
-# print metrics
+# Print metrics
 print(f"MSE loss: {th.nn.functional.mse_loss(reconstruction, crosscoder_input).item():.2f}")
 print(f"L1 sparsity: {features.abs().sum():.1f}")
 print(f"L0 sparsity: {(features > 1e-4).sum()}")
 ```
 
+---
+
 ## Dedicated Feature Crosscoders (DFCs)
 
-DFCs extend the CrossCoder architecture with **feature partitioning** for improved model diffing. The feature dictionary is divided into three disjoint sets:
+**⭐ NEW in this fork** - DFCs extend the CrossCoder architecture with **feature partitioning** for improved model diffing. The feature dictionary is divided into three disjoint sets:
 - **Model A-exclusive features**: Only Model A can encode/decode from these
 - **Model B-exclusive features**: Only Model B can encode/decode from these
 - **Shared features**: Both models can encode/decode from these
@@ -105,15 +149,9 @@ pytest tests/test_dfc.py -v
 
 For more details, see `dictionary_learning/feature_partition.py` and `dictionary_learning/dictionary.py`.
 
-- A way to cache activations in order to load them later to train a SAE or Crosscoder in `cache.py`.
-- A script for training a Crosscoder using pre-computed activations in `scripts/train_crosscoder.py`.
-- You can now load and push dictionaries to the Huggingface model hub.
-```py
-my_super_cool_dictionary.push_to_hub("username/my-super-cool-dictionary")
-loaded_dictionary = MyDictionary.from_pretrained("username/my-super-cool-dictionary", from_hub=True)
-```
+---
 
-# Original README
+# Original README (from saprmarks/dictionary_learning)
 
 This is a repository for doing dictionary learning via sparse autoencoders on neural network activations. It was developed by Samuel Marks and Aaron Mueller. 
 
