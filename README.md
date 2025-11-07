@@ -3,9 +3,10 @@ This repo contains a few new features compared to the original repo:
 - It is `pip` installable.
 - A new `Crosscoder` class for training CrossCoders as described in [the anthropic paper](https://transformer-circuits.pub/drafts/crosscoders/index.html#model-diffing).
 - `BatchTopKCrossCoder` as described in [our paper](https://arxiv.org/pdf/2504.02922)
+- **Dedicated Feature Crosscoders (DFCs)** for improved model diffing with feature partitioning
 ```py
 !pip install git+https://github.com/jkminder/dictionary_learning
-from dictionary_learning import CrossCoder
+from dictionary_learning import CrossCoder, DedicatedFeatureBatchTopKCrossCoder
 from nnsight import LanguageModel
 import torch as th
 
@@ -32,6 +33,74 @@ print(f"MSE loss: {th.nn.functional.mse_loss(reconstruction, crosscoder_input).i
 print(f"L1 sparsity: {features.abs().sum():.1f}")
 print(f"L0 sparsity: {(features > 1e-4).sum()}")
 ```
+
+## Dedicated Feature Crosscoders (DFCs)
+
+DFCs extend the CrossCoder architecture with **feature partitioning** for improved model diffing. The feature dictionary is divided into three disjoint sets:
+- **Model A-exclusive features**: Only Model A can encode/decode from these
+- **Model B-exclusive features**: Only Model B can encode/decode from these
+- **Shared features**: Both models can encode/decode from these
+
+This architectural constraint creates a prior favoring model-exclusive feature discovery, which is valuable for identifying behavioral differences between model variants.
+
+### Key Features
+- **Gradient Masking**: Prevents auxiliary loss from leaking gradients to the wrong model's exclusive features
+- **Partition Integrity**: Forbidden weights (e.g., Model A's decoder for B-exclusive features) remain zero throughout training
+- **Automatic Training**: Works with existing `BatchTopKCrossCoderTrainer` without modification
+- **Comprehensive Testing**: 19 tests validate gradient masking and auxiliary loss isolation
+
+### Usage Example
+```py
+from dictionary_learning import DedicatedFeatureBatchTopKCrossCoder
+from dictionary_learning.trainers.crosscoder import BatchTopKCrossCoderTrainer
+
+# Create DFC with 5% features dedicated to each model
+dfc = DedicatedFeatureBatchTopKCrossCoder(
+    activation_dim=2304,
+    dict_size=131072,
+    num_layers=2,
+    k=200,
+    model_a_exclusive_pct=0.05,  # 5% = 6,554 features for Model A
+    model_b_exclusive_pct=0.05,  # 5% = 6,554 features for Model B
+    # Remaining 90% = 117,964 shared features
+)
+
+# Train using standard CrossCoder trainer
+trainer = BatchTopKCrossCoderTrainer(
+    steps=100000,
+    activation_dim=2304,
+    dict_size=131072,
+    k=200,
+    layer=13,
+    lm_name="model-a_vs_model-b",
+    lr=1e-4,
+    dict_class=DedicatedFeatureBatchTopKCrossCoder,
+    dict_class_kwargs={
+        "model_a_exclusive_pct": 0.05,
+        "model_b_exclusive_pct": 0.05,
+    },
+)
+
+# Verify partition integrity during/after training
+integrity = dfc.verify_partition_integrity()
+print(f"Max encoder violation: {integrity['encoder']['max_violation']:.2e}")
+print(f"Max decoder violation: {integrity['decoder']['max_violation']:.2e}")
+# Values should stay near zero (< 1e-6) throughout training
+```
+
+### Testing DFCs
+```bash
+# Comprehensive test suite (19 tests including gradient masking validation)
+pytest tests/test_dfc.py -v
+```
+
+### Partition Size Considerations
+- **Smaller partitions (1-2%)**: Better shared feature quality, may miss fine-grained differences
+- **Larger partitions (5-10%)**: Captures more model-specific features, trades off shared capacity
+- **Recommended start**: 5% for each model (default)
+
+For more details, see `dictionary_learning/feature_partition.py` and `dictionary_learning/dictionary.py`.
+
 - A way to cache activations in order to load them later to train a SAE or Crosscoder in `cache.py`.
 - A script for training a Crosscoder using pre-computed activations in `scripts/train_crosscoder.py`.
 - You can now load and push dictionaries to the Huggingface model hub.
