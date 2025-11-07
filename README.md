@@ -1,11 +1,15 @@
 # Dictionary Learning and Crosscoders
-This repo contains a few new features compared to the original repo:
+
+This is a fork of the [dictionary_learning](https://github.com/jkminder/dictionary_learning) repository (originally by [saprmarks](https://github.com/saprmarks/dictionary_learning)), extended with the following features:
+
 - It is `pip` installable.
 - A new `Crosscoder` class for training CrossCoders as described in [the anthropic paper](https://transformer-circuits.pub/drafts/crosscoders/index.html#model-diffing).
 - `BatchTopKCrossCoder` as described in [our paper](https://arxiv.org/pdf/2504.02922)
 - **Dedicated Feature Crosscoders (DFCs)** for improved model diffing with feature partitioning
+
+## Installation
 ```py
-!pip install git+https://github.com/jkminder/dictionary_learning
+!pip install git+https://github.com/superkaiba/dfc_learning
 from dictionary_learning import CrossCoder, DedicatedFeatureBatchTopKCrossCoder
 from nnsight import LanguageModel
 import torch as th
